@@ -1,0 +1,77 @@
+{
+  "name": "@doedja/scenecut",
+  "version": "1.0.0",
+  "description": "Scene change detection for Node.js using Xvid's motion estimation algorithm",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "scenecut": "./bin/cli.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/keyframes.esm.js",
+      "require": "./dist/keyframes.cjs.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:wasm": "cd src/wasm && bash build.sh",
+    "build:ts": "tsc",
+    "build:bundle": "rollup -c",
+    "build": "npm run build:ts && npm run build:bundle",
+    "dev": "tsc --watch",
+    "test": "node test-basic.js",
+    "test:full": "node test-full.js",
+    "lint": "eslint src/**/*.ts",
+    "format": "prettier --write \"src/**/*.{ts,js}\"",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "scene-detection",
+    "video",
+    "keyframe",
+    "xvid",
+    "ffmpeg",
+    "video-processing",
+    "motion-estimation",
+    "wasm",
+    "webassembly"
+  ],
+  "author": "doedja",
+  "license": "GPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/doedja/scenecut.git"
+  },
+  "bugs": {
+    "url": "https://github.com/doedja/scenecut/issues"
+  },
+  "homepage": "https://github.com/doedja/scenecut#readme",
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "fluent-ffmpeg": "^2.1.2"
+  },
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^25.0.7",
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-typescript": "^11.1.5",
+    "@types/fluent-ffmpeg": "^2.1.24",
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "eslint": "^8.56.0",
+    "prettier": "^3.1.0",
+    "rollup": "^4.9.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
