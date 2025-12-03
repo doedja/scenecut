@@ -28,7 +28,9 @@ jobs:
           ./emsdk activate latest
 
       - name: Build WASM
-        run: npm run build:wasm
+        run: |
+          source /tmp/emsdk/emsdk_env.sh
+          npm run build:wasm
 
       - name: Build TypeScript and Bundle
         run: npm run build
