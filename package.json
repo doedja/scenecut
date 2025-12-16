@@ -55,6 +55,7 @@
   "homepage": "https://github.com/doedja/scenecut#readme",
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
     "fluent-ffmpeg": "^2.1.2"
   },
   "devDependencies": {

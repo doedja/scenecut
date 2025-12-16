@@ -16,7 +16,7 @@ export default {
       sourcemap: true
     }
   ],
-  external: ['fluent-ffmpeg', '@ffmpeg-installer/ffmpeg', 'fs', 'path', 'stream', 'events', 'worker_threads'],
+  external: ['fluent-ffmpeg', '@ffmpeg-installer/ffmpeg', '@ffprobe-installer/ffprobe', 'fs', 'path', 'stream', 'events', 'worker_threads'],
   plugins: [
     resolve(),
     commonjs()

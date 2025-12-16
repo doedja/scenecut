@@ -6,12 +6,14 @@
 
 import * as ffmpeg from 'fluent-ffmpeg';
 import * as ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import * as ffprobeInstaller from '@ffprobe-installer/ffprobe';
 import { RawFrame, VideoMetadata } from '../types';
 import { FrameBuffer } from './frame-buffer';
 import { Readable } from 'stream';
 
-// Set FFmpeg path from installer
+// Set FFmpeg and FFprobe paths from installers
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
 /**
  * Ring Buffer - Fixed-size circular buffer for streaming data
