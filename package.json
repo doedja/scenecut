@@ -30,7 +30,8 @@
     "test:full": "node test-full.js",
     "lint": "eslint src/**/*.ts",
     "format": "prettier --write \"src/**/*.{ts,js}\"",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "release": "npm version patch && npm publish --access public"
   },
   "keywords": [
     "scene-detection",
