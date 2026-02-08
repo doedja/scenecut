@@ -9,7 +9,7 @@
  *   keyframes video.mp4 --sensitivity high
  */
 
-const { detectSceneChanges } = require('../dist/keyframes.cjs.js');
+const { detectSceneChanges, extractSceneImages } = require('../dist/keyframes.cjs.js');
 const path = require('path');
 const fs = require('fs');
 
@@ -28,18 +28,21 @@ Examples:
   scenecut video.mkv --output keyframes.txt --format aegisub
   scenecut movie.mp4 --sensitivity high --format timecode
   scenecut video.mp4 --format csv --output scenes.csv
+  scenecut video.mp4 --thumbnails ./thumbs --timeout 120
 
 Options:
   --output, -o <file>       Output file (default: {filename}_keyframes.txt)
   --format, -f <format>     Output format: json|csv|aegisub|timecode (default: aegisub)
-  --sensitivity, -s <level> Sensitivity: low|medium|high (default: medium)
+  --sensitivity, -s <level> Sensitivity: low|medium|high (default: low)
+  --timeout, -t <seconds>   Abort after N seconds (default: no timeout)
+  --thumbnails <dir>        Extract scene thumbnails to directory
   --quiet, -q               Suppress progress output
   --verbose, -v             Show detailed output
   --help, -h                Show this help
 
 Formats:
-  json                      JSON with full metadata
-  csv                       CSV with frame,timestamp,timecode
+  json                      JSON with full metadata, confidence, and duration
+  csv                       CSV with frame,timestamp,timecode,confidence,duration
   aegisub (or txt)          Aegisub keyframes format (frame numbers)
   timecode (or tc)          Simple timecode list (HH:MM:SS.mmm)
 
@@ -60,9 +63,11 @@ if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
 let videoPath = null;
 let outputPath = null; // Will be derived from video filename if not specified
 let outputFormat = 'aegisub'; // Default to Aegisub format
-let sensitivity = 'medium';
+let sensitivity = 'low';
 let quiet = false;
 let verbose = false;
+let timeout = 0;
+let thumbnailDir = null;
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -73,6 +78,10 @@ for (let i = 0; i < args.length; i++) {
     outputFormat = args[++i];
   } else if (arg === '--sensitivity' || arg === '-s') {
     sensitivity = args[++i];
+  } else if (arg === '--timeout' || arg === '-t') {
+    timeout = parseInt(args[++i], 10);
+  } else if (arg === '--thumbnails') {
+    thumbnailDir = args[++i];
   } else if (arg === '--quiet' || arg === '-q') {
     quiet = true;
   } else if (arg === '--verbose' || arg === '-v') {
@@ -122,6 +131,12 @@ async function run() {
     console.log(`Input:  ${videoPath}`);
     console.log(`Size:   ${fileSize} MB`);
     console.log(`Output: ${path.resolve(outputPath)}`);
+    if (timeout > 0) {
+      console.log(`Timeout: ${timeout}s`);
+    }
+    if (thumbnailDir) {
+      console.log(`Thumbnails: ${path.resolve(thumbnailDir)}`);
+    }
     console.log('='.repeat(60));
     console.log();
   }
@@ -131,26 +146,35 @@ async function run() {
   let lastProgressFrame = 0;
   let sceneCount = 0;
 
+  // Set up AbortController for timeout
+  let controller = null;
+  let timeoutHandle = null;
+  if (timeout > 0) {
+    controller = new AbortController();
+    timeoutHandle = setTimeout(() => {
+      controller.abort();
+    }, timeout * 1000);
+  }
+
   try {
-    const results = await detectSceneChanges(videoPath, {
+    const options = {
       sensitivity,
       searchRange: 'medium',
+      signal: controller ? controller.signal : undefined,
       onProgress: (progress) => {
         if (quiet) return;
 
         const now = Date.now();
         // Update every 3 seconds
         if (now - lastProgressTime > 3000 || progress.percent === 100) {
-          const framesSinceLastUpdate = progress.currentFrame - lastProgressFrame;
-          const timeSinceLastUpdate = (now - lastProgressTime) / 1000;
-          const currentFps = framesSinceLastUpdate / timeSinceLastUpdate;
-
+          const fps = progress.fps || 0;
           const progressBar = createProgressBar(progress.percent);
           const etaStr = progress.eta ? ` ETA: ${formatTime(progress.eta)}` : '';
+          const scenesStr = progress.scenesDetected ? ` [${progress.scenesDetected} scenes]` : '';
 
           process.stdout.write(
             `\r${progressBar} ${progress.percent.toString().padStart(3)}% ` +
-            `[${currentFps.toFixed(1)} fps]${etaStr}${' '.repeat(10)}`
+            `[${fps.toFixed(1)} fps]${etaStr}${scenesStr}${' '.repeat(10)}`
           );
 
           lastProgressTime = now;
@@ -160,11 +184,27 @@ async function run() {
       onScene: (scene) => {
         sceneCount++;
         if (verbose && !quiet) {
+          const confidenceStr = scene.confidence != null ? ` (confidence: ${(scene.confidence * 100).toFixed(0)}%)` : '';
           console.log();
-          console.log(`  Scene ${sceneCount}: Frame ${scene.frameNumber} at ${scene.timecode}`);
+          console.log(`  Scene ${sceneCount}: Frame ${scene.frameNumber} at ${scene.timecode}${confidenceStr}`);
         }
       }
-    });
+    };
+
+    let results;
+    if (thumbnailDir) {
+      results = await extractSceneImages(videoPath, options, {
+        outputDir: thumbnailDir,
+        format: 'jpg',
+        quality: 85
+      });
+    } else {
+      results = await detectSceneChanges(videoPath, options);
+    }
+
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
 
     const endTime = Date.now();
     const elapsed = (endTime - startTime) / 1000;
@@ -177,6 +217,15 @@ async function run() {
       console.log(`Scenes detected:  ${results.scenes.length}`);
       console.log(`Processing time:  ${formatTime(elapsed)}`);
       console.log(`Processing speed: ${(results.metadata.totalFrames / elapsed).toFixed(1)} fps`);
+      if (results.metadata.codec) {
+        console.log(`Video codec:      ${results.metadata.codec}`);
+      }
+      if (results.metadata.pixelFormat) {
+        console.log(`Pixel format:     ${results.metadata.pixelFormat}`);
+      }
+      if (results.metadata.bitrate) {
+        console.log(`Bitrate:          ${(results.metadata.bitrate / 1000).toFixed(0)} kbps`);
+      }
       console.log('='.repeat(60));
     }
 
@@ -193,7 +242,7 @@ async function run() {
         outputPath = outputPath.replace('.json', '.txt');
       }
     } else if (outputFormat === 'timecode' || outputFormat === 'tc') {
-      output = formatTimecode(results);
+      output = formatTimecodeList(results);
       if (outputPath.endsWith('.json')) {
         outputPath = outputPath.replace('.json', '.txt');
       }
@@ -206,13 +255,17 @@ async function run() {
 
     if (!quiet) {
       console.log(`Results saved to: ${path.resolve(outputPath)}`);
-      console.log();
 
-      // Print scene list
-      console.log('Scene List:');
-      results.scenes.forEach((scene, i) => {
-        console.log(`  ${(i + 1).toString().padStart(3)}. Frame ${scene.frameNumber.toString().padStart(6)} at ${scene.timecode}`);
-      });
+      if (verbose) {
+        console.log();
+        // Print scene list
+        console.log('Scene List:');
+        results.scenes.forEach((scene, i) => {
+          const confidenceStr = scene.confidence != null ? ` (${(scene.confidence * 100).toFixed(0)}%)` : '';
+          const durationStr = scene.duration != null ? ` [${formatTime(scene.duration)}]` : '';
+          console.log(`  ${(i + 1).toString().padStart(3)}. Frame ${scene.frameNumber.toString().padStart(6)} at ${scene.timecode}${confidenceStr}${durationStr}`);
+        });
+      }
     } else {
       // In quiet mode, just print the output
       console.log(output);
@@ -221,6 +274,16 @@ async function run() {
     process.exit(0);
 
   } catch (error) {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+
+    if (error.message === 'Detection aborted') {
+      console.error();
+      console.error('Detection aborted (timeout or cancellation).');
+      process.exit(2);
+    }
+
     console.error();
     console.error('Error:', error.message);
     if (verbose) {
@@ -235,7 +298,7 @@ function createProgressBar(percent) {
   const width = 30;
   const filled = Math.round((percent / 100) * width);
   const empty = width - filled;
-  return '[' + '█'.repeat(filled) + '░'.repeat(empty) + ']';
+  return '[' + '\u2588'.repeat(filled) + '\u2591'.repeat(empty) + ']';
 }
 
 function formatTime(seconds) {
@@ -253,9 +316,12 @@ function formatTime(seconds) {
 }
 
 function formatCSV(results) {
-  let csv = 'frame,timestamp,timecode\n';
+  let csv = 'frame,timestamp,timecode,confidence,duration,frameCount\n';
   results.scenes.forEach(scene => {
-    csv += `${scene.frameNumber},${scene.timestamp},${scene.timecode || ''}\n`;
+    const conf = scene.confidence != null ? scene.confidence.toFixed(4) : '';
+    const dur = scene.duration != null ? scene.duration.toFixed(3) : '';
+    const fc = scene.frameCount != null ? scene.frameCount : '';
+    csv += `${scene.frameNumber},${scene.timestamp},${scene.timecode || ''},${conf},${dur},${fc}\n`;
   });
   return csv;
 }
@@ -271,7 +337,7 @@ function formatAegisub(results) {
   return output;
 }
 
-function formatTimecode(results) {
+function formatTimecodeList(results) {
   // Simple timecode list - one per line
   // Can be used with various subtitle tools
   let output = '';

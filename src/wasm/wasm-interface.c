@@ -3,11 +3,60 @@
 #include <emscripten.h>
 #include "detection.h"
 
+/* Pre-allocated macroblock array for reuse across frames */
+static MACROBLOCK *g_pMBs = NULL;
+static uint32_t g_mb_count = 0;
+
+/**
+ * Pre-allocate macroblock array for given dimensions.
+ * Call once at startup to avoid per-frame malloc/free.
+ *
+ * @param width Frame width
+ * @param height Frame height
+ * @return 1 on success, 0 on failure
+ */
+EMSCRIPTEN_KEEPALIVE
+int allocate_mb_array(uint32_t width, uint32_t height) {
+    uint32_t mb_width = (width + 15) / 16;
+    uint32_t mb_height = (height + 15) / 16;
+    uint32_t count = mb_width * mb_height;
+
+    /* Reuse if already correct size */
+    if (g_pMBs && g_mb_count == count) {
+        return 1;
+    }
+
+    /* Free old allocation if different size */
+    if (g_pMBs) {
+        free(g_pMBs);
+        g_pMBs = NULL;
+        g_mb_count = 0;
+    }
+
+    g_pMBs = (MACROBLOCK*)malloc(count * sizeof(MACROBLOCK));
+    if (!g_pMBs) {
+        return 0;
+    }
+
+    g_mb_count = count;
+    return 1;
+}
+
+/**
+ * Free pre-allocated macroblock array.
+ * Call at cleanup.
+ */
+EMSCRIPTEN_KEEPALIVE
+void free_mb_array(void) {
+    if (g_pMBs) {
+        free(g_pMBs);
+        g_pMBs = NULL;
+        g_mb_count = 0;
+    }
+}
+
 /**
  * JavaScript-callable wrapper for MEanalysis
- *
- * This function allocates necessary structures and calls the original
- * MEanalysis function from detection.c
  *
  * @param pRefPtr Pointer to reference frame in WASM memory
  * @param pCurPtr Pointer to current frame in WASM memory
@@ -15,7 +64,9 @@
  * @param height Frame height (before padding)
  * @param intraCount Number of consecutive non-scene-change frames
  * @param fcode Motion search range parameter (4 = 256 pixels)
- * @return 1 if scene change detected, 0 otherwise
+ * @param intraThresh Primary intra threshold (e.g. 2000)
+ * @param intraThresh2 Secondary intra threshold for sSAD comparison (e.g. 90)
+ * @return sSAD score (>= intraThresh2 means scene change), or -1 on error
  */
 EMSCRIPTEN_KEEPALIVE
 int MEanalysis_js(
@@ -24,7 +75,9 @@ int MEanalysis_js(
     uint32_t width,
     uint32_t height,
     int intraCount,
-    int fcode
+    int fcode,
+    int intraThresh,
+    int intraThresh2
 ) {
     // Cast pointers from memory addresses
     const uint8_t *pRef = (const uint8_t*)pRefPtr;
@@ -40,29 +93,43 @@ int MEanalysis_js(
     param.edged_height = 16 * param.mb_height + 2 * 64;
     param.edge_size = 64;
 
-    // Allocate macroblock array
-    MACROBLOCK *pMBs = (MACROBLOCK*)malloc(param.mb_width * param.mb_height * sizeof(MACROBLOCK));
-    if (!pMBs) {
-        return 0;  // Allocation failed, assume no scene change
+    // Use pre-allocated array if available and correct size
+    MACROBLOCK *pMBs;
+    int using_preallocated = 0;
+    uint32_t mb_count = param.mb_width * param.mb_height;
+
+    if (g_pMBs && g_mb_count == mb_count) {
+        pMBs = g_pMBs;
+        using_preallocated = 1;
+    } else {
+        // Fallback to per-frame allocation
+        pMBs = (MACROBLOCK*)malloc(mb_count * sizeof(MACROBLOCK));
+        if (!pMBs) {
+            return -1;  // Allocation failed - return error code
+        }
     }
 
-    // Initialize macroblock array
-    memset(pMBs, 0, param.mb_width * param.mb_height * sizeof(MACROBLOCK));
+    // Initialize macroblock array (needed every frame for clean state)
+    memset(pMBs, 0, mb_count * sizeof(MACROBLOCK));
 
-    // Call original MEanalysis
-    int sceneChange = MEanalysis(
+    // Call MEanalysis with parameterized thresholds
+    int result = MEanalysis(
         pRef,
         pCur,
         &param,
         pMBs,
         intraCount,
-        fcode
+        fcode,
+        intraThresh,
+        intraThresh2
     );
 
-    // Free allocated memory
-    free(pMBs);
+    // Free only if we did per-frame allocation
+    if (!using_preallocated) {
+        free(pMBs);
+    }
 
-    return sceneChange;
+    return result;
 }
 
 /**

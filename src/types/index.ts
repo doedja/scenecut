@@ -40,6 +40,10 @@ export interface SceneInfo {
   timecode?: string;
   /** Confidence score (0-1), if available */
   confidence?: number;
+  /** Duration of this scene in seconds (until next scene or end of video) */
+  duration?: number;
+  /** Number of frames in this scene */
+  frameCount?: number;
 }
 
 /**
@@ -57,6 +61,12 @@ export interface VideoMetadata {
     width: number;
     height: number;
   };
+  /** Video codec name */
+  codec?: string;
+  /** Pixel format */
+  pixelFormat?: string;
+  /** Bitrate in bits per second */
+  bitrate?: number;
 }
 
 /**
@@ -93,6 +103,12 @@ export interface Progress {
   percent: number;
   /** Estimated time remaining in seconds */
   eta?: number;
+  /** Current processing speed in frames per second */
+  fps?: number;
+  /** Elapsed processing time in seconds */
+  elapsed?: number;
+  /** Number of scenes detected so far */
+  scenesDetected?: number;
 }
 
 /**
@@ -188,6 +204,10 @@ export interface DetectionOptions {
   // Output
   /** Output format */
   format?: 'json' | 'csv' | 'edl';
+
+  // Cancellation
+  /** AbortSignal for cancellation support */
+  signal?: AbortSignal;
 }
 
 /**
@@ -202,7 +222,9 @@ export interface WasmModule {
     width: number,
     height: number,
     intraCount: number,
-    fcode: number
+    fcode: number,
+    intraThresh: number,
+    intraThresh2: number
   ) => number;
   _calculate_padded_size: (width: number, height: number) => number;
   _pad_frame: (
@@ -211,6 +233,8 @@ export interface WasmModule {
     width: number,
     height: number
   ) => void;
+  _allocate_mb_array: (width: number, height: number) => number;
+  _free_mb_array: () => void;
   HEAPU8: Uint8Array;
   ccall: (
     ident: string,
@@ -275,4 +299,20 @@ export interface EdlExportOptions {
   title?: string;
   /** Frame rate (FCM) */
   fcm?: 'DROP FRAME' | 'NON-DROP FRAME';
+}
+
+/**
+ * Options for batch frame image extraction
+ */
+export interface FrameImageOptions {
+  /** Output directory for extracted images */
+  outputDir: string;
+  /** Image format */
+  format?: 'jpg' | 'png' | 'bmp';
+  /** JPEG quality (1-100) */
+  quality?: number;
+  /** Output width (maintains aspect ratio if height not set) */
+  width?: number;
+  /** Filename template (use {frame} and {timestamp} placeholders) */
+  filenameTemplate?: string;
 }

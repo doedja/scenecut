@@ -6,23 +6,38 @@
  * - Memory allocation and management
  * - Calling WASM functions
  * - Data marshalling between JS and WASM
+ * - Double-buffering to avoid redundant frame copies
  */
 
 import { WasmModule, RawFrame } from '../types';
 import * as path from 'path';
 import * as fs from 'fs';
 
+export interface SceneChangeResult {
+  isSceneChange: boolean;
+  confidence: number;
+}
+
 export class WasmBridge {
   private module: WasmModule | null = null;
   private initialized: boolean = false;
 
-  // Pre-allocated WASM buffers for frame processing
-  private prevFramePtr: number = 0;      // Raw previous frame
-  private curFramePtr: number = 0;       // Raw current frame
-  private prevPaddedPtr: number = 0;     // Padded previous frame
-  private curPaddedPtr: number = 0;      // Padded current frame
-  private allocatedFrameSize: number = 0;  // Size of raw frame buffers
-  private allocatedPaddedSize: number = 0; // Size of padded frame buffers
+  // Double-buffered WASM pointers for frame processing
+  // Slot A and Slot B raw frame buffers
+  private slotARawPtr: number = 0;
+  private slotBRawPtr: number = 0;
+  // Slot A and Slot B padded frame buffers
+  private slotAPaddedPtr: number = 0;
+  private slotBPaddedPtr: number = 0;
+  // Which slot currently holds the "previous" frame (true = A, false = B)
+  private prevIsSlotA: boolean = true;
+  // Whether the previous slot has valid padded data
+  private prevSlotPadded: boolean = false;
+
+  private allocatedFrameSize: number = 0;
+  private allocatedPaddedSize: number = 0;
+
+  // Frame dimensions (reserved for future use in validation/resizing)
 
   /**
    * Initialize the WASM module
@@ -62,11 +77,8 @@ export class WasmBridge {
   }
 
   /**
-   * Pre-allocate WASM buffers for frame processing
-   * This eliminates per-frame allocation overhead and reduces memory copies
-   *
-   * @param width Frame width
-   * @param height Frame height
+   * Pre-allocate WASM buffers for frame processing.
+   * Allocates double-buffered raw + padded slots and pre-allocates the MB array.
    */
   allocateBuffers(width: number, height: number): void {
     this.ensureInitialized();
@@ -76,43 +88,58 @@ export class WasmBridge {
 
     // Allocate or re-allocate raw frame buffers if size changed
     if (frameSize !== this.allocatedFrameSize) {
-      if (this.prevFramePtr) this.module!._free(this.prevFramePtr);
-      if (this.curFramePtr) this.module!._free(this.curFramePtr);
+      if (this.slotARawPtr) this.module!._free(this.slotARawPtr);
+      if (this.slotBRawPtr) this.module!._free(this.slotBRawPtr);
 
-      this.prevFramePtr = this.module!._malloc(frameSize);
-      this.curFramePtr = this.module!._malloc(frameSize);
+      this.slotARawPtr = this.module!._malloc(frameSize);
+      this.slotBRawPtr = this.module!._malloc(frameSize);
       this.allocatedFrameSize = frameSize;
     }
 
     // Allocate or re-allocate padded frame buffers if size changed
     if (paddedSize !== this.allocatedPaddedSize) {
-      if (this.prevPaddedPtr) this.module!._free(this.prevPaddedPtr);
-      if (this.curPaddedPtr) this.module!._free(this.curPaddedPtr);
+      if (this.slotAPaddedPtr) this.module!._free(this.slotAPaddedPtr);
+      if (this.slotBPaddedPtr) this.module!._free(this.slotBPaddedPtr);
 
-      this.prevPaddedPtr = this.module!._malloc(paddedSize);
-      this.curPaddedPtr = this.module!._malloc(paddedSize);
+      this.slotAPaddedPtr = this.module!._malloc(paddedSize);
+      this.slotBPaddedPtr = this.module!._malloc(paddedSize);
       this.allocatedPaddedSize = paddedSize;
+    }
+
+    // Reset double-buffer state
+    this.prevIsSlotA = true;
+    this.prevSlotPadded = false;
+
+    // Pre-allocate macroblock array in WASM
+    const mbResult = this.module!._allocate_mb_array(width, height);
+    if (mbResult === 0) {
+      throw new Error('Failed to pre-allocate macroblock array in WASM');
     }
   }
 
   /**
-   * Detect scene change between two frames
+   * Detect scene change between two frames using double-buffering.
    *
-   * Uses pre-allocated WASM buffers to eliminate per-frame allocation
-   * and reduce memory copies from 3 to 1 per frame.
+   * On first call, both frames are copied and padded.
+   * On subsequent calls, only the new current frame is copied and padded;
+   * the previous frame is already in WASM memory from the last call.
    *
    * @param prevFrame Previous frame
    * @param curFrame Current frame
    * @param intraCount Number of consecutive non-scene-change frames
-   * @param fcode Motion search range parameter (default: 4 = 256 pixels)
-   * @returns true if scene change detected, false otherwise
+   * @param fcode Motion search range parameter
+   * @param intraThresh Primary intra threshold
+   * @param intraThresh2 Secondary intra threshold (sSAD comparison)
+   * @returns Scene change result with confidence score
    */
   detectSceneChange(
     prevFrame: RawFrame,
     curFrame: RawFrame,
     intraCount: number,
-    fcode: number = 4
-  ): boolean {
+    fcode: number = 4,
+    intraThresh: number = 2000,
+    intraThresh2: number = 90
+  ): SceneChangeResult {
     this.ensureInitialized();
 
     // Validate inputs
@@ -120,38 +147,77 @@ export class WasmBridge {
       throw new Error('Frame dimensions must match');
     }
 
-    // Ensure buffers are allocated (should be done once at start)
-    if (!this.prevFramePtr || this.allocatedFrameSize !== prevFrame.data.length) {
+    // Ensure buffers are allocated
+    if (!this.slotARawPtr || this.allocatedFrameSize !== prevFrame.data.length) {
       this.allocateBuffers(prevFrame.width, prevFrame.height);
     }
 
-    // Single copy: Raw frames -> WASM memory (eliminates 2 extra copies)
-    this.module!.HEAPU8.set(prevFrame.data, this.prevFramePtr);
-    this.module!.HEAPU8.set(curFrame.data, this.curFramePtr);
+    // Determine which slot is "prev" and which is "cur"
+    const prevRawPtr = this.prevIsSlotA ? this.slotARawPtr : this.slotBRawPtr;
+    const prevPaddedPtr = this.prevIsSlotA ? this.slotAPaddedPtr : this.slotBPaddedPtr;
+    const curRawPtr = this.prevIsSlotA ? this.slotBRawPtr : this.slotARawPtr;
+    const curPaddedPtr = this.prevIsSlotA ? this.slotBPaddedPtr : this.slotAPaddedPtr;
 
-    // Pad frames in-place in WASM (no copy back to JS)
-    this.module!._pad_frame(this.prevFramePtr, this.prevPaddedPtr, prevFrame.width, prevFrame.height);
-    this.module!._pad_frame(this.curFramePtr, this.curPaddedPtr, curFrame.width, curFrame.height);
+    // Copy and pad previous frame only if not already valid in WASM
+    if (!this.prevSlotPadded) {
+      this.module!.HEAPU8.set(prevFrame.data, prevRawPtr);
+      this.module!._pad_frame(prevRawPtr, prevPaddedPtr, prevFrame.width, prevFrame.height);
+    }
 
-    // Run motion estimation on pre-padded buffers
-    const result = this.module!._MEanalysis_js(
-      this.prevPaddedPtr,
-      this.curPaddedPtr,
+    // Always copy and pad the new current frame
+    this.module!.HEAPU8.set(curFrame.data, curRawPtr);
+    this.module!._pad_frame(curRawPtr, curPaddedPtr, curFrame.width, curFrame.height);
+
+    // Run motion estimation with parameterized thresholds
+    const rawScore = this.module!._MEanalysis_js(
+      prevPaddedPtr,
+      curPaddedPtr,
       prevFrame.width,
       prevFrame.height,
       intraCount,
-      fcode
+      fcode,
+      intraThresh,
+      intraThresh2
     );
 
-    return result === 1;
+    // Check for WASM error
+    if (rawScore === -1) {
+      throw new Error(
+        'WASM memory allocation failed during scene detection. ' +
+        `Frame size: ${prevFrame.width}x${prevFrame.height}. ` +
+        'The video resolution may be too high for available WASM memory.'
+      );
+    }
+
+    // Swap roles: current slot becomes previous for next call
+    this.prevIsSlotA = !this.prevIsSlotA;
+    this.prevSlotPadded = true;
+
+    // Determine scene change and confidence
+    const isSceneChange = rawScore >= intraThresh2;
+
+    // Normalize confidence: 0 when at threshold, 1 at 2x threshold
+    // For non-scene-changes, confidence represents "how close" (0 = very far from threshold)
+    let confidence: number;
+    if (isSceneChange) {
+      confidence = Math.min(1.0, rawScore / (intraThresh2 * 2));
+    } else {
+      confidence = intraThresh2 > 0 ? Math.min(1.0, rawScore / intraThresh2) : 0;
+    }
+
+    return { isSceneChange, confidence };
+  }
+
+  /**
+   * Reset double-buffer state (e.g., after a seek or when starting fresh)
+   */
+  resetBufferState(): void {
+    this.prevIsSlotA = true;
+    this.prevSlotPadded = false;
   }
 
   /**
    * Calculate required buffer size for a padded frame
-   *
-   * @param width Original frame width
-   * @param height Original frame height
-   * @returns Required buffer size in bytes
    */
   calculatePaddedSize(width: number, height: number): number {
     this.ensureInitialized();
@@ -160,10 +226,6 @@ export class WasmBridge {
 
   /**
    * Get macroblock parameters for a given frame size
-   *
-   * @param width Frame width
-   * @param height Frame height
-   * @returns Macroblock parameters
    */
   getMBParam(width: number, height: number) {
     const mb_width = Math.ceil(width / 16);
@@ -192,20 +254,24 @@ export class WasmBridge {
    * Clean up resources
    */
   destroy(): void {
-    // Free pre-allocated WASM buffers
     if (this.module) {
-      if (this.prevFramePtr) this.module._free(this.prevFramePtr);
-      if (this.curFramePtr) this.module._free(this.curFramePtr);
-      if (this.prevPaddedPtr) this.module._free(this.prevPaddedPtr);
-      if (this.curPaddedPtr) this.module._free(this.curPaddedPtr);
+      // Free pre-allocated macroblock array
+      this.module._free_mb_array();
+
+      // Free double-buffered WASM frame buffers
+      if (this.slotARawPtr) this.module._free(this.slotARawPtr);
+      if (this.slotBRawPtr) this.module._free(this.slotBRawPtr);
+      if (this.slotAPaddedPtr) this.module._free(this.slotAPaddedPtr);
+      if (this.slotBPaddedPtr) this.module._free(this.slotBPaddedPtr);
     }
 
-    this.prevFramePtr = 0;
-    this.curFramePtr = 0;
-    this.prevPaddedPtr = 0;
-    this.curPaddedPtr = 0;
+    this.slotARawPtr = 0;
+    this.slotBRawPtr = 0;
+    this.slotAPaddedPtr = 0;
+    this.slotBPaddedPtr = 0;
     this.allocatedFrameSize = 0;
     this.allocatedPaddedSize = 0;
+    this.prevSlotPadded = false;
 
     this.module = null;
     this.initialized = false;

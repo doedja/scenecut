@@ -413,12 +413,14 @@ MEanalysis(   const uint8_t *pRef,
       const MBParam * const pParam,
       MACROBLOCK * const pMBs,
       const int intraCount,
-      const int fcode)
+      const int fcode,
+      const int intraThresh,
+      const int intraThresh2)
 {
    uint32_t x, y, intra = 0;
    int sSAD = 0;
-   int IntraThresh = 2000,
-       IntraThresh2 = 90;
+   int IntraThresh = intraThresh,
+       IntraThresh2 = intraThresh2;
 
    int blocks = 10;
    int complexity = 0;
@@ -452,7 +454,7 @@ MEanalysis(   const uint8_t *pRef,
             if (dev + IntraThresh < pMB->sad16) {
                pMB->mode = MODE_INTRA;
                if (++intra > ((pParam->mb_height-2)*(pParam->mb_width-2))/2)
-                  return 1;
+                  return IntraThresh2 * 2; /* early exit: strong scene change, return high score */
             }
 
             if (pMB->mvs[0].x == 0 && pMB->mvs[0].y == 0)
@@ -467,5 +469,10 @@ MEanalysis(   const uint8_t *pRef,
 
    sSAD /= complexity + 4*blocks;
 
-   return sSAD > IntraThresh2;
+   /* Return the sSAD score directly.
+    * Caller compares against IntraThresh2 to decide scene change.
+    * Positive value >= IntraThresh2 means scene change, with magnitude indicating confidence.
+    * Value < IntraThresh2 means no scene change.
+    * This allows the JS layer to compute a confidence score. */
+   return sSAD;
 }

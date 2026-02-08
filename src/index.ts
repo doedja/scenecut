@@ -8,6 +8,7 @@
 export { SceneDetector } from './detection/detector';
 export { FFmpegDecoder } from './decoder/ffmpeg-decoder';
 export { WasmBridge } from './detection/wasm-bridge';
+export { TemporalSmoother } from './detection/temporal-smoother';
 export { FrameBuffer } from './decoder/frame-buffer';
 export { BufferPool } from './utils/buffer-pool';
 
@@ -25,7 +26,8 @@ export type {
   CustomThresholds,
   TemporalSmoothing,
   ProgressiveProcessing,
-  FrameExtractionOptions
+  FrameExtractionOptions,
+  FrameImageOptions
 } from './types';
 
 // Export utilities
@@ -41,7 +43,8 @@ export {
 } from './utils/frame-processor';
 
 import { SceneDetector } from './detection/detector';
-import { DetectionOptions, DetectionResult } from './types';
+import { FFmpegDecoder } from './decoder/ffmpeg-decoder';
+import { DetectionOptions, DetectionResult, FrameImageOptions } from './types';
 
 /**
  * Detect scene changes in a video file (simple API)
@@ -58,7 +61,7 @@ import { DetectionOptions, DetectionResult } from './types';
  * console.log(`Found ${results.scenes.length} scenes`);
  *
  * results.scenes.forEach(scene => {
- *   console.log(`Scene at ${scene.timecode}`);
+ *   console.log(`Scene at ${scene.timecode} (confidence: ${scene.confidence})`);
  * });
  * ```
  */
@@ -70,6 +73,37 @@ export async function detectSceneChanges(
 
   try {
     const results = await detector.detect(videoPath);
+    return results;
+  } finally {
+    detector.destroy();
+  }
+}
+
+/**
+ * Extract scene thumbnail images from a video
+ *
+ * @param videoPath Path to video file
+ * @param options Detection options
+ * @param imageOptions Image extraction options
+ * @returns Detection results (images are written to disk)
+ */
+export async function extractSceneImages(
+  videoPath: string,
+  options?: DetectionOptions,
+  imageOptions?: FrameImageOptions
+): Promise<DetectionResult> {
+  const detector = new SceneDetector(options);
+
+  try {
+    const results = await detector.detect(videoPath);
+
+    if (imageOptions) {
+      const decoder = new FFmpegDecoder(videoPath);
+      const frameNumbers = results.scenes.map(s => s.frameNumber);
+      await decoder.extractFrameImages(frameNumbers, imageOptions);
+      decoder.destroy();
+    }
+
     return results;
   } finally {
     detector.destroy();

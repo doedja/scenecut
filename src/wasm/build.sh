@@ -25,7 +25,11 @@ if [ -d "/tmp/emsdk" ]; then
         export PATH="$EMSDK/upstream/emscripten:$PATH"
     fi
 
-    EMCC="$EMSDK/upstream/emscripten/emcc"
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+        EMCC="$EMSDK/upstream/emscripten/emcc.bat"
+    else
+        EMCC="$EMSDK/upstream/emscripten/emcc"
+    fi
 elif command -v emcc &> /dev/null; then
     EMCC="emcc"
 else
@@ -46,7 +50,7 @@ mkdir -p "$OUTPUT_DIR"
   -O3 \
   -msimd128 \
   -s WASM=1 \
-  -s EXPORTED_FUNCTIONS='["_MEanalysis_js","_calculate_padded_size","_pad_frame","_malloc","_free"]' \
+  -s EXPORTED_FUNCTIONS='["_MEanalysis_js","_calculate_padded_size","_pad_frame","_allocate_mb_array","_free_mb_array","_malloc","_free"]' \
   -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","getValue","setValue","HEAPU8"]' \
   -s MODULARIZE=1 \
   -s EXPORT_NAME='createWasmModule' \

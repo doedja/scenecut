@@ -41,4 +41,6 @@ int MEanalysis(	const uint8_t *pRef,
 			const MBParam * const pParam,
          MACROBLOCK * const pMBs,
          const int intraCount,
-         const int fcode);
+         const int fcode,
+         const int intraThresh,
+         const int intraThresh2);
