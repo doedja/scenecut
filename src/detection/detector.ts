@@ -1,10 +1,26 @@
 /**
- * Scene Detector - Main orchestrator for scene change detection
+ * Scene Detector — main orchestrator.
+ *
+ * Pipeline per frame:
+ *   1. Fused fast pass: single loop over frame computes sampled MAD (vs prev)
+ *      and drift (vs EMA reference). Cheap, ~1.5% of pixels touched.
+ *   2. Gate: skip WASM entirely if MAD below quick-reject and drift below
+ *      drift-reject. This catches the ~80% of near-identical frames.
+ *   3. WASM MEanalysis returns rawScore. Calibrated to p_cut via sigmoid in
+ *      the bridge.
+ *   4. Fade rescue: if p_cut is moderate (borderline) AND drift is high,
+ *      lower the effective threshold locally — no extra WASM run, we already
+ *      have the raw score.
+ *   5. Warmup (first N frames): collect p_cut distribution and nudge the
+ *      detection threshold to match the per-video noise floor.
+ *   6. Smoother: non-max suppression with min-gap refractory window.
+ *   7. EMA reference updates every frame regardless, so drift tracks slow
+ *      content changes (pans, lighting) instead of only the last cut.
  */
 
 import { FFmpegDecoder } from '../decoder/ffmpeg-decoder';
-import { WasmBridge } from './wasm-bridge';
-import { TemporalSmoother } from './temporal-smoother';
+import { WasmBridge, calibratePCut } from './wasm-bridge';
+import { SceneSmoother } from './scene-smoother';
 import {
   DetectionOptions,
   DetectionResult,
@@ -21,255 +37,216 @@ import {
 } from '../utils/frame-processor';
 
 export class SceneDetector {
-  private options: Required<DetectionOptions>;
+  private options: Required<Pick<DetectionOptions,
+    'sensitivity' | 'searchRange' | 'onProgress' | 'onScene' | 'format'
+  >> & { signal?: AbortSignal };
+
   private wasmBridge: WasmBridge;
   private state: DetectionState;
 
   constructor(options: DetectionOptions = {}) {
-    // Set default options
     this.options = {
       sensitivity: options.sensitivity || 'low',
-      customThresholds: options.customThresholds || { intraThresh: 2000, intraThresh2: 90 },
-      searchRange: options.searchRange || 'medium',
-      workers: options.workers || 1,
-      progressive: options.progressive || { enabled: false, initialStep: 1, refinementSteps: [] },
-      temporalSmoothing: options.temporalSmoothing || { enabled: false, windowSize: 5, minConsecutive: 2 },
-      frameExtraction: options.frameExtraction || { pixelFormat: 'gray', maxBufferFrames: 2 },
+      searchRange: options.searchRange || 'auto',
       onProgress: options.onProgress || (() => {}),
       onScene: options.onScene || (() => {}),
       format: options.format || 'json',
-      signal: options.signal || undefined as any
+      signal: options.signal
     };
 
     this.wasmBridge = new WasmBridge();
-
-    // Initialize detection state
-    this.state = {
-      intraCount: 1,
-      fcode: 4,
-      prevFrame: null,
-      curFrame: null
-    };
+    this.state = { intraCount: 1, fcode: 4, prevFrame: null, curFrame: null };
   }
 
-  /**
-   * Detect scene changes in a video file
-   */
   async detect(videoPath: string): Promise<DetectionResult> {
-    // Initialize WASM module
     await this.wasmBridge.init();
 
-    // Create decoder
-    const decoder = new FFmpegDecoder(videoPath, {
-      pixelFormat: this.options.frameExtraction.pixelFormat,
-      maxBufferFrames: this.options.frameExtraction.maxBufferFrames,
-      skipFrames: this.options.frameExtraction.skipFrames
-    });
-
-    // Get video metadata
+    const decoder = new FFmpegDecoder(videoPath, { pixelFormat: 'gray', maxBufferFrames: 2 });
     const metadata = await decoder.getMetadata();
 
-    // Calculate fcode from search range
     this.state.fcode = calculateFcode(
       this.options.searchRange,
       metadata.resolution.width,
       metadata.resolution.height
     );
 
-    // Calculate thresholds from sensitivity
-    let thresholds: { intraThresh: number; intraThresh2: number };
-    if (this.options.sensitivity === 'custom') {
-      thresholds = this.options.customThresholds;
-    } else {
-      thresholds = calculateThresholds(this.options.sensitivity);
-    }
+    const base = calculateThresholds(this.options.sensitivity);
+    // intraThresh2 is the sigmoid midpoint and the smoother's decision point.
+    // We let the warmup pass shift it to match per-video noise, within bounds.
+    let intraThresh = base.intraThresh;
+    let intraThresh2 = base.intraThresh2;
+    const baseThresh2 = intraThresh2;
 
-    // Pre-allocate WASM buffers
-    this.wasmBridge.allocateBuffers(
-      metadata.resolution.width,
-      metadata.resolution.height
-    );
+    this.wasmBridge.allocateBuffers(metadata.resolution.width, metadata.resolution.height);
 
-    // Initialize temporal smoother if enabled
-    let temporalSmoother: TemporalSmoother | null = null;
-    if (this.options.temporalSmoothing.enabled) {
-      temporalSmoother = new TemporalSmoother(this.options.temporalSmoothing);
-    }
+    // Gap scaled to framerate: ~0.25s minimum between cuts
+    const minGap = Math.max(4, Math.round(metadata.fps * 0.25));
+    const smoother = new SceneSmoother({ minGap, threshold: 0.5 });
 
-    // Initialize scene list (frame 0 is always a scene change)
-    const scenes: SceneInfo[] = [
-      {
-        frameNumber: 0,
-        timestamp: 0,
-        timecode: '00:00:00.000',
-        confidence: 1.0
-      }
-    ];
+    const scenes: SceneInfo[] = [{
+      frameNumber: 0,
+      timestamp: 0,
+      timecode: '00:00:00.000',
+      confidence: 1.0
+    }];
 
-    // Processing statistics
     const startTime = Date.now();
     let processedFrames = 0;
     let firstFrameValidated = false;
-
-    // Rolling FPS window for accurate speed metrics (3-second window)
     const fpsWindow: { time: number; frame: number }[] = [];
 
-    // Fade/dissolve detection state
-    let keyframeData: Uint8Array | null = null;
-    const driftThresholdFactor = 0.6; // Re-run detection at 60% of base thresholds
+    // --- Fade detection state (EMA reference, replaces stale keyframe) ---
+    // EMA decays slowly enough to accumulate fade drift but fast enough to
+    // absorb stable content. alpha=0.03 ≈ 33-frame effective window.
+    const frameSize = metadata.resolution.width * metadata.resolution.height;
+    const emaStride = 4; // sample every 4th pixel; matches old drift cost
+    const emaSamples = Math.floor(frameSize / emaStride);
+    const emaRef = new Float32Array(emaSamples);
+    const emaAlpha = 0.03;
+    // Drift threshold on sampled MAD against EMA (grayscale 0-255).
+    const driftRescue = 25;
+    // Fade rescue scales thresh2 down by this factor if drift triggers.
+    const fadeFactor = 0.6;
 
-    // Quick-reject sampling interval
-    const quickRejectStep = 64;
-    const quickRejectThreshold = 5;
+    // --- Quick-reject gating ---
+    const quickRejectStride = 64;
+    const quickRejectThreshold = 4;
 
-    // AbortSignal check
+    // --- Adaptive warmup ---
+    // Collect rawScores over first N frames, set threshold = max(base, p95*1.5).
+    const warmupFrames = Math.min(120, Math.max(60, Math.floor(metadata.fps * 2)));
+    const warmupScores: number[] = [];
+    let warmupDone = false;
+
     const signal = this.options.signal;
 
-    // Process frames
     await decoder.extractFrames(
       async (frame: RawFrame) => {
-        // Check abort signal
-        if (signal && signal.aborted) {
-          throw new Error('Detection aborted');
-        }
+        if (signal?.aborted) throw new Error('Detection aborted');
 
-        // Validate only the first frame (dimensions never change within a video)
         if (!firstFrameValidated) {
           validateFrame(frame);
           firstFrameValidated = true;
         }
 
-        // Update current frame
         this.state.curFrame = frame;
 
-        // Need at least 2 frames to detect scene change
         if (this.state.prevFrame) {
-          let isSceneChange = false;
-          let confidence = 0;
-
-          // Quick-reject: sampled MAD between prev and cur frame
           const prevData = this.state.prevFrame.data;
           const curData = this.state.curFrame.data;
-          let sampledDiff = 0;
-          let sampleCount = 0;
-          for (let i = 0; i < curData.length; i += quickRejectStep) {
-            sampledDiff += Math.abs(curData[i] - prevData[i]);
-            sampleCount++;
-          }
-          const avgDiff = sampledDiff / sampleCount;
 
-          if (avgDiff >= quickRejectThreshold) {
-            // Frame differs enough, run full WASM detection
-            const result = this.wasmBridge.detectSceneChange(
+          // === Fused pass: compute sampled MAD, EMA drift, AND update EMA in one walk.
+          // MAD samples at quickRejectStride (sparse). Drift + EMA update walk
+          // at emaStride. Running both in a single loop halves memory reads
+          // vs two passes at stride 4.
+          let madSum = 0;
+          let madCount = 0;
+          let driftSum = 0;
+          const a = emaAlpha;
+          const b = 1 - a;
+          const madEvery = quickRejectStride / emaStride; // integer: 16
+          for (let i = 0, s = 0; i < curData.length; i += emaStride, s++) {
+            const cur = curData[i];
+            const ref = emaRef[s];
+            driftSum += cur > ref ? cur - ref : ref - cur;
+            emaRef[s] = b * ref + a * cur;
+            if ((s % madEvery) === 0) {
+              const p = prevData[i];
+              madSum += cur > p ? cur - p : p - cur;
+              madCount++;
+            }
+          }
+          const mad = madCount > 0 ? madSum / madCount : 0;
+          const drift = driftSum / emaSamples;
+
+          let pCut = 0;
+          let rawScore = 0;
+
+          // Gate: skip WASM only if both signals quiet
+          if (mad >= quickRejectThreshold || drift >= driftRescue) {
+            const res = this.wasmBridge.detectSceneChange(
               this.state.prevFrame,
               this.state.curFrame,
               this.state.intraCount,
               this.state.fcode,
-              thresholds.intraThresh,
-              thresholds.intraThresh2
+              intraThresh,
+              intraThresh2
             );
+            rawScore = res.rawScore;
+            pCut = res.pCut;
 
-            isSceneChange = result.isSceneChange;
-            confidence = result.confidence;
+            // Fade rescue — recompute p_cut against a lower threshold if
+            // drift is elevated. No extra WASM call; we already have rawScore.
+            if (pCut < 0.5 && drift >= driftRescue) {
+              const loweredThresh = Math.round(intraThresh2 * fadeFactor);
+              const pCutFade = calibratePCut(rawScore, loweredThresh);
+              if (pCutFade > pCut) pCut = pCutFade;
+            }
 
-            // Fade/dissolve detection: if not detected as scene change,
-            // check drift from last keyframe
-            if (!isSceneChange && keyframeData) {
-              let driftSum = 0;
-              let driftCount = 0;
-              // Sample every 4th pixel for speed
-              for (let i = 0; i < curData.length; i += 4) {
-                driftSum += Math.abs(curData[i] - keyframeData[i]);
-                driftCount++;
-              }
-              const driftAvg = driftSum / driftCount;
-
-              // If cumulative drift is high but per-frame SAD didn't trigger,
-              // re-run with lowered thresholds
-              if (driftAvg > 30) {
-                const fadeResult = this.wasmBridge.detectSceneChange(
-                  this.state.prevFrame,
-                  this.state.curFrame,
-                  this.state.intraCount,
-                  this.state.fcode,
-                  Math.round(thresholds.intraThresh * driftThresholdFactor),
-                  Math.round(thresholds.intraThresh2 * driftThresholdFactor)
-                );
-
-                if (fadeResult.isSceneChange) {
-                  isSceneChange = true;
-                  confidence = fadeResult.confidence;
-                }
+            // Warmup calibration: watch rawScore of non-cut frames to size the
+            // noise floor. We use pCut<0.5 under current threshold as proxy.
+            if (!warmupDone) {
+              warmupScores.push(rawScore);
+              if (warmupScores.length >= warmupFrames) {
+                warmupDone = true;
+                // Robust p95 of observed rawScores.
+                const sorted = warmupScores.slice().sort((a, b) => a - b);
+                const p95 = sorted[Math.floor(sorted.length * 0.95)];
+                const calibrated = Math.max(baseThresh2, Math.round(p95 * 1.5));
+                // Clamp to ≤ 4× base to avoid pathological cases on cut-heavy
+                // warmup (trailers etc).
+                intraThresh2 = Math.min(calibrated, baseThresh2 * 4);
+                // Scale intraThresh proportionally so intra-block detection
+                // stays consistent with sSAD expectations.
+                intraThresh = Math.round(base.intraThresh * (intraThresh2 / baseThresh2));
               }
             }
           }
-          // else: quick-reject - frames are nearly identical, skip WASM call
 
-          // Apply temporal smoothing if enabled
-          if (temporalSmoother) {
-            const smoothed = temporalSmoother.process(frame.frameNumber, isSceneChange, confidence);
-            isSceneChange = smoothed.isSceneChange;
-            confidence = smoothed.confidence;
-          }
-
-          if (isSceneChange) {
+          // Feed smoother. It applies NMS over a minGap window before
+          // confirming. No flash rule — low-prob single frames are dropped
+          // by the threshold gate inside the smoother.
+          const emissions = smoother.observe(frame.frameNumber, pCut);
+          for (const e of emissions) {
             const scene: SceneInfo = {
-              frameNumber: frame.frameNumber,
-              timestamp: frame.pts,
-              timecode: formatTimecode(frame.pts),
-              confidence
+              frameNumber: e.frameNumber,
+              timestamp: e.frameNumber / metadata.fps,
+              timecode: formatTimecode(e.frameNumber / metadata.fps),
+              confidence: e.confidence
             };
-
             scenes.push(scene);
-
-            // Call scene callback
             this.options.onScene(scene);
-
-            // Reset intraCount
             this.state.intraCount = 1;
-
-            // Update keyframe for drift detection
-            keyframeData = new Uint8Array(curData);
-          } else {
+          }
+          if (emissions.length === 0) {
             this.state.intraCount++;
           }
+          // EMA already updated in fused pass above.
         } else {
-          // First frame is the initial keyframe for drift detection
-          keyframeData = new Uint8Array(frame.data);
+          // First frame seeds the EMA.
+          for (let i = 0, s = 0; i < frame.data.length; i += emaStride, s++) {
+            emaRef[s] = frame.data[i];
+          }
         }
 
-        // Move current frame to previous
         this.state.prevFrame = this.state.curFrame;
-
         processedFrames++;
       },
       (current: number, total: number) => {
-        // Enhanced progress with rolling FPS window
         const now = Date.now();
         const elapsed = (now - startTime) / 1000;
-
-        // Add to rolling window
         fpsWindow.push({ time: now, frame: current });
-
-        // Remove samples older than 3 seconds
         while (fpsWindow.length > 1 && (now - fpsWindow[0].time) > 3000) {
           fpsWindow.shift();
         }
-
-        // Calculate instantaneous FPS from rolling window
         let currentFps = 0;
         if (fpsWindow.length >= 2) {
           const oldest = fpsWindow[0];
           const newest = fpsWindow[fpsWindow.length - 1];
           const dt = (newest.time - oldest.time) / 1000;
-          if (dt > 0) {
-            currentFps = (newest.frame - oldest.frame) / dt;
-          }
+          if (dt > 0) currentFps = (newest.frame - oldest.frame) / dt;
         }
-
-        // Calculate ETA from instantaneous FPS
         const remaining = currentFps > 0 ? (total - current) / currentFps : undefined;
-
         const progress: Progress = {
           currentFrame: current,
           totalFrames: total,
@@ -279,44 +256,48 @@ export class SceneDetector {
           elapsed,
           scenesDetected: scenes.length
         };
-
         this.options.onProgress(progress);
-      }
+      },
+      signal
     );
 
-    // Calculate statistics
+    // Flush any pending smoother candidates
+    const tail = smoother.flush();
+    for (const e of tail) {
+      const scene: SceneInfo = {
+        frameNumber: e.frameNumber,
+        timestamp: e.frameNumber / metadata.fps,
+        timecode: formatTimecode(e.frameNumber / metadata.fps),
+        confidence: e.confidence
+      };
+      scenes.push(scene);
+      this.options.onScene(scene);
+    }
+
     const endTime = Date.now();
     const processingTime = (endTime - startTime) / 1000;
     const framesPerSecond = processedFrames / processingTime;
 
-    // Post-process: compute scene durations
+    // Scene durations & frame counts
     for (let i = 0; i < scenes.length; i++) {
       if (i < scenes.length - 1) {
         scenes[i].duration = scenes[i + 1].timestamp - scenes[i].timestamp;
         scenes[i].frameCount = scenes[i + 1].frameNumber - scenes[i].frameNumber;
       } else {
-        // Last scene: duration until end of video
         scenes[i].duration = metadata.duration - scenes[i].timestamp;
         scenes[i].frameCount = metadata.totalFrames - scenes[i].frameNumber;
       }
     }
 
-    // Clean up
     decoder.destroy();
 
     return {
       scenes,
       metadata,
-      stats: {
-        processingTime,
-        framesPerSecond
-      }
+      stats: { processingTime, framesPerSecond }
     };
   }
 
-  /**
-   * Destroy the detector and clean up resources
-   */
   destroy(): void {
     this.wasmBridge.destroy();
     this.state.prevFrame = null;

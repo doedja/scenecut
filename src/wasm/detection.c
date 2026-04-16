@@ -428,11 +428,23 @@ MEanalysis(   const uint8_t *pRef,
    SearchData Data;
    Data.iEdgedWidth = pParam->edged_width;
 
+   /* Resolution-scaled intra-boost. The original 15*(10-n)^2 + 4*(30-n)
+    * was tuned for SD content where mb count is small; at 4K the boost is
+    * under-powered. Scale by active macroblock count vs a 1080p reference
+    * (8100/4 ≈ 2025 active MBs, since loop steps by 2 in both dims).
+    */
    if (intraCount > 0 && intraCount < 30) {
+      const int active_mbs = ((pParam->mb_width - 2) / 2) * ((pParam->mb_height - 2) / 2);
+      const int ref_mbs = 2025;
+      const int scale_num = active_mbs > 0 ? active_mbs : ref_mbs;
       if (intraCount < 10) {
-         IntraThresh += 15 * (10 - intraCount) * (10 - intraCount);
+         int boost = 15 * (10 - intraCount) * (10 - intraCount);
+         boost = (boost * scale_num) / ref_mbs;
+         IntraThresh += boost;
       }
-      IntraThresh2 += 4 * (30 - intraCount);
+      int boost2 = 4 * (30 - intraCount);
+      boost2 = (boost2 * scale_num) / ref_mbs;
+      IntraThresh2 += boost2;
    }
 
    for (y = 1; y < pParam->mb_height-1; y += 2) {
@@ -454,7 +466,11 @@ MEanalysis(   const uint8_t *pRef,
             if (dev + IntraThresh < pMB->sad16) {
                pMB->mode = MODE_INTRA;
                if (++intra > ((pParam->mb_height-2)*(pParam->mb_width-2))/2)
-                  return IntraThresh2 * 2; /* early exit: strong scene change, return high score */
+                  /* Early exit: >50% intra blocks = unambiguous cut. Return a
+                   * score well into the sigmoid saturation region (≥ 5*thresh
+                   * puts p_cut ≈ 1.0) so the JS confidence stays maxed instead
+                   * of collapsing to the old 2*thresh boundary (p_cut ≈ 0.95). */
+                  return IntraThresh2 * 5;
             }
 
             if (pMB->mvs[0].x == 0 && pMB->mvs[0].y == 0)

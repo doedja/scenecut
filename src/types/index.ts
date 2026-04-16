@@ -1,18 +1,12 @@
 /**
- * Type definitions for keyframes scene detection library
+ * Type definitions for scenecut
  */
 
-/**
- * 2D motion vector
- */
 export interface Vector {
   x: number;
   y: number;
 }
 
-/**
- * Raw frame data
- */
 export interface RawFrame {
   /** Raw pixel data (grayscale, 1 byte per pixel) */
   data: Uint8Array;
@@ -28,9 +22,6 @@ export interface RawFrame {
   frameNumber: number;
 }
 
-/**
- * Scene change information
- */
 export interface SceneInfo {
   /** Frame number where scene change occurs */
   frameNumber: number;
@@ -38,181 +29,67 @@ export interface SceneInfo {
   timestamp: number;
   /** Human-readable timecode (HH:MM:SS.mmm) */
   timecode?: string;
-  /** Confidence score (0-1), if available */
+  /** Confidence score (0-1) */
   confidence?: number;
-  /** Duration of this scene in seconds (until next scene or end of video) */
+  /** Duration of this scene in seconds */
   duration?: number;
   /** Number of frames in this scene */
   frameCount?: number;
 }
 
-/**
- * Video metadata
- */
 export interface VideoMetadata {
-  /** Total number of frames */
   totalFrames: number;
-  /** Video duration in seconds */
   duration: number;
-  /** Frames per second */
   fps: number;
-  /** Video resolution */
-  resolution: {
-    width: number;
-    height: number;
-  };
-  /** Video codec name */
+  resolution: { width: number; height: number };
   codec?: string;
-  /** Pixel format */
   pixelFormat?: string;
-  /** Bitrate in bits per second */
   bitrate?: number;
 }
 
-/**
- * Detection statistics
- */
 export interface DetectionStats {
-  /** Total processing time in seconds */
   processingTime: number;
-  /** Processing speed in frames per second */
   framesPerSecond: number;
 }
 
-/**
- * Complete detection result
- */
 export interface DetectionResult {
-  /** Array of detected scene changes */
   scenes: SceneInfo[];
-  /** Video metadata */
   metadata: VideoMetadata;
-  /** Processing statistics */
   stats?: DetectionStats;
 }
 
-/**
- * Progress information
- */
 export interface Progress {
-  /** Current frame number */
   currentFrame: number;
-  /** Total frames to process */
   totalFrames: number;
-  /** Progress percentage (0-100) */
   percent: number;
-  /** Estimated time remaining in seconds */
   eta?: number;
-  /** Current processing speed in frames per second */
   fps?: number;
-  /** Elapsed processing time in seconds */
   elapsed?: number;
-  /** Number of scenes detected so far */
   scenesDetected?: number;
 }
 
-/**
- * Sensitivity level for scene detection
- */
-export type SensitivityLevel = 'low' | 'medium' | 'high' | 'custom';
-
-/**
- * Search range for motion estimation
- */
+export type SensitivityLevel = 'low' | 'medium' | 'high';
 export type SearchRange = 'auto' | 'small' | 'medium' | 'large';
+export type ExportFormat = 'json' | 'csv' | 'edl';
 
 /**
- * Custom threshold values
- */
-export interface CustomThresholds {
-  /** Intra threshold (default: 2000) */
-  intraThresh: number;
-  /** Secondary intra threshold (default: 90) */
-  intraThresh2: number;
-}
-
-/**
- * Temporal smoothing configuration
- */
-export interface TemporalSmoothing {
-  /** Enable temporal smoothing */
-  enabled: boolean;
-  /** Number of frames to consider in sliding window */
-  windowSize: number;
-  /** Minimum consecutive frames above threshold */
-  minConsecutive: number;
-}
-
-/**
- * Progressive processing configuration
- */
-export interface ProgressiveProcessing {
-  /** Enable progressive processing */
-  enabled: boolean;
-  /** Initial step size (process every Nth frame) */
-  initialStep: number;
-  /** Refinement steps (e.g., [4, 2, 1]) */
-  refinementSteps: number[];
-}
-
-/**
- * Frame extraction options
- */
-export interface FrameExtractionOptions {
-  /** Pixel format for extraction */
-  pixelFormat?: 'gray' | 'yuv420p';
-  /** Maximum number of frames to buffer */
-  maxBufferFrames?: number;
-  /** Skip every N frames (for performance testing) */
-  skipFrames?: number;
-}
-
-/**
- * Detection options
+ * Detection options. Minimal surface — the detector auto-calibrates and smooths internally.
  */
 export interface DetectionOptions {
-  // Sensitivity
-  /** Detection sensitivity level */
+  /** Detection sensitivity level (default: 'low') */
   sensitivity?: SensitivityLevel;
-  /** Custom threshold values (only used when sensitivity='custom') */
-  customThresholds?: CustomThresholds;
-
-  // Performance
-  /** Motion search range */
+  /** Motion search range (default: 'auto') */
   searchRange?: SearchRange;
-  /** Number of worker threads (default: CPU count - 1) */
-  workers?: number;
-
-  // Processing
-  /** Progressive processing configuration */
-  progressive?: ProgressiveProcessing;
-
-  // Filtering
-  /** Temporal smoothing to reduce false positives */
-  temporalSmoothing?: TemporalSmoothing;
-
-  // Frame extraction
-  /** Frame extraction options */
-  frameExtraction?: FrameExtractionOptions;
-
-  // Callbacks
   /** Progress callback */
   onProgress?: (progress: Progress) => void;
   /** Scene change callback */
   onScene?: (scene: SceneInfo) => void;
-
-  // Output
   /** Output format */
-  format?: 'json' | 'csv' | 'edl';
-
-  // Cancellation
-  /** AbortSignal for cancellation support */
+  format?: ExportFormat;
+  /** AbortSignal for cancellation */
   signal?: AbortSignal;
 }
 
-/**
- * WASM module interface
- */
 export interface WasmModule {
   _malloc: (size: number) => number;
   _free: (ptr: number) => void;
@@ -227,45 +104,21 @@ export interface WasmModule {
     intraThresh2: number
   ) => number;
   _calculate_padded_size: (width: number, height: number) => number;
-  _pad_frame: (
-    srcPtr: number,
-    dstPtr: number,
-    width: number,
-    height: number
-  ) => void;
+  _pad_frame: (srcPtr: number, dstPtr: number, width: number, height: number) => void;
   _allocate_mb_array: (width: number, height: number) => number;
   _free_mb_array: () => void;
   HEAPU8: Uint8Array;
-  ccall: (
-    ident: string,
-    returnType: string,
-    argTypes: string[],
-    args: any[]
-  ) => any;
-  cwrap: (
-    ident: string,
-    returnType: string,
-    argTypes: string[]
-  ) => (...args: any[]) => any;
+  ccall: (ident: string, returnType: string, argTypes: string[], args: any[]) => any;
+  cwrap: (ident: string, returnType: string, argTypes: string[]) => (...args: any[]) => any;
 }
 
-/**
- * Internal detection state
- */
 export interface DetectionState {
-  /** Number of consecutive non-scene-change frames */
   intraCount: number;
-  /** Motion search range parameter */
   fcode: number;
-  /** Previous frame buffer */
   prevFrame: RawFrame | null;
-  /** Current frame buffer */
   curFrame: RawFrame | null;
 }
 
-/**
- * Macroblock parameters
- */
 export interface MBParam {
   width: number;
   height: number;
@@ -276,43 +129,20 @@ export interface MBParam {
   edge_size: number;
 }
 
-/**
- * Export format options
- */
-export type ExportFormat = 'json' | 'csv' | 'edl';
-
-/**
- * CSV export options
- */
 export interface CsvExportOptions {
-  /** Include header row */
   header?: boolean;
-  /** Field delimiter */
   delimiter?: string;
 }
 
-/**
- * EDL export options
- */
 export interface EdlExportOptions {
-  /** EDL title */
   title?: string;
-  /** Frame rate (FCM) */
   fcm?: 'DROP FRAME' | 'NON-DROP FRAME';
 }
 
-/**
- * Options for batch frame image extraction
- */
 export interface FrameImageOptions {
-  /** Output directory for extracted images */
   outputDir: string;
-  /** Image format */
   format?: 'jpg' | 'png' | 'bmp';
-  /** JPEG quality (1-100) */
   quality?: number;
-  /** Output width (maintains aspect ratio if height not set) */
   width?: number;
-  /** Filename template (use {frame} and {timestamp} placeholders) */
   filenameTemplate?: string;
 }

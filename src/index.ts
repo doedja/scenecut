@@ -1,18 +1,17 @@
 /**
- * keyframes - Scene change detection for Node.js
+ * scenecut - Scene change detection for Node.js
  *
- * A JavaScript/TypeScript port of vapoursynth-wwxd using Xvid's motion estimation algorithm.
- * Powered by WebAssembly for high performance.
+ * Xvid motion estimation via WebAssembly, with online smoothing
+ * and per-video adaptive calibration.
  */
 
 export { SceneDetector } from './detection/detector';
 export { FFmpegDecoder } from './decoder/ffmpeg-decoder';
-export { WasmBridge } from './detection/wasm-bridge';
-export { TemporalSmoother } from './detection/temporal-smoother';
+export { WasmBridge, calibratePCut } from './detection/wasm-bridge';
+export { SceneSmoother } from './detection/scene-smoother';
 export { FrameBuffer } from './decoder/frame-buffer';
 export { BufferPool } from './utils/buffer-pool';
 
-// Export types
 export type {
   DetectionOptions,
   DetectionResult,
@@ -23,14 +22,10 @@ export type {
   RawFrame,
   SensitivityLevel,
   SearchRange,
-  CustomThresholds,
-  TemporalSmoothing,
-  ProgressiveProcessing,
-  FrameExtractionOptions,
+  ExportFormat,
   FrameImageOptions
 } from './types';
 
-// Export utilities
 export {
   formatTimecode,
   calculateFcode,
@@ -47,45 +42,22 @@ import { FFmpegDecoder } from './decoder/ffmpeg-decoder';
 import { DetectionOptions, DetectionResult, FrameImageOptions } from './types';
 
 /**
- * Detect scene changes in a video file (simple API)
- *
- * @param videoPath Path to video file
- * @param options Detection options
- * @returns Detection results with scene changes and metadata
- *
- * @example
- * ```typescript
- * import { detectSceneChanges } from 'keyframes';
- *
- * const results = await detectSceneChanges('input.mp4');
- * console.log(`Found ${results.scenes.length} scenes`);
- *
- * results.scenes.forEach(scene => {
- *   console.log(`Scene at ${scene.timecode} (confidence: ${scene.confidence})`);
- * });
- * ```
+ * Detect scene changes in a video file.
  */
 export async function detectSceneChanges(
   videoPath: string,
   options?: DetectionOptions
 ): Promise<DetectionResult> {
   const detector = new SceneDetector(options);
-
   try {
-    const results = await detector.detect(videoPath);
-    return results;
+    return await detector.detect(videoPath);
   } finally {
     detector.destroy();
   }
 }
 
 /**
- * Extract scene thumbnail images from a video
- *
- * @param videoPath Path to video file
- * @param options Detection options
- * @param imageOptions Image extraction options
- * @returns Detection results (images are written to disk)
+ * Detect scenes and extract a thumbnail per scene.
  */
 export async function extractSceneImages(
   videoPath: string,
@@ -93,40 +65,29 @@ export async function extractSceneImages(
   imageOptions?: FrameImageOptions
 ): Promise<DetectionResult> {
   const detector = new SceneDetector(options);
-
   try {
     const results = await detector.detect(videoPath);
-
     if (imageOptions) {
       const decoder = new FFmpegDecoder(videoPath);
       const frameNumbers = results.scenes.map(s => s.frameNumber);
       await decoder.extractFrameImages(frameNumbers, imageOptions);
       decoder.destroy();
     }
-
     return results;
   } finally {
     detector.destroy();
   }
 }
 
-/**
- * Version information
- */
-export const version = '1.0.0';
+export const version = '2.0.0';
 
-/**
- * Library information
- */
 export const info = {
-  name: 'keyframes',
-  version: '1.0.0',
-  description: 'Scene change detection for Node.js using Xvid\'s motion estimation algorithm',
+  name: 'scenecut',
+  version: '2.0.0',
+  description: 'Scene change detection for Node.js using Xvid motion estimation',
   license: 'GPL-2.0',
-  repository: 'https://github.com/yourusername/keyframes',
-  author: '',
   credits: {
-    original: 'vapoursynth-wwxd by dubhater (https://github.com/dubhater/vapoursynth-wwxd)',
-    algorithm: 'Xvid motion estimation (https://www.xvid.com)'
+    original: 'vapoursynth-wwxd by dubhater',
+    algorithm: 'Xvid motion estimation'
   }
 };

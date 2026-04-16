@@ -1,258 +1,113 @@
 # scenecut
 
-Fast, accurate scene change detection for Node.js using Xvid's motion estimation algorithm compiled to WebAssembly.
+Fast, accurate scene change detection for Node.js. Xvid motion estimation compiled to WebAssembly, plus an online smoother and per-video adaptive calibration.
 
 ## Features
 
-- **Fast**: WebAssembly-accelerated motion estimation with SIMD, double-buffered frame pipeline, and quick-reject filtering
-- **Accurate**: Uses Xvid's proven motion estimation algorithm with configurable thresholds that actually work
-- **Confidence scoring**: Each scene change includes a 0-1 confidence score from the motion estimator
-- **Fade/dissolve detection**: Catches gradual transitions that per-frame analysis misses
-- **Temporal smoothing**: Optional sliding window filter to suppress false positives and flash frames
-- **Multiple output formats**: Aegisub keyframes, timecodes, CSV (with confidence + duration), JSON
-- **Scene duration**: Each scene includes duration and frame count
-- **Cancellable**: AbortController support with `--timeout` for long videos
-- **Batch thumbnails**: Extract scene images in a single FFmpeg pass
-- **Cross-platform**: Works on Windows, Linux, and macOS
+- **Xvid motion estimation** via WASM with SIMD, double-buffered frame pipeline, fused quick-reject + drift pass that skips WASM for nearly-identical frames.
+- **Adaptive calibration**: a warmup pass measures per-video noise floor and shifts the decision threshold to match. Clean content stays sensitive, noisy content stops over-triggering.
+- **Sigmoid-calibrated confidence**: scores are a proper probability, 0.5 at the decision boundary, saturating near 1.0 on unambiguous cuts.
+- **Fade/dissolve detection** via an EMA reference frame. Drift accumulates across gradual transitions and rescues borderline motion scores — without a second WASM run.
+- **Non-max suppression smoother**: an online NMS window keeps only the highest-probability cut within a refractory gap (scaled to FPS). Replaces heuristic flash rules.
+- **Thumbnails**: extract one image per scene in a single FFmpeg pass.
+- **Formats**: Aegisub keyframes, timecodes, CSV, JSON.
+- **Cancellable**: AbortController support; `--timeout` for long videos.
+- **Cross-platform**: macOS, Linux, Windows.
 
-## Installation
-
-### Global Installation (CLI)
+## Install
 
 ```bash
+# CLI
 npm install -g @doedja/scenecut
-```
 
-### Local Installation (API)
-
-```bash
+# Library
 npm install @doedja/scenecut
 ```
 
-## CLI Usage
-
-### Basic Usage
+## CLI
 
 ```bash
-# Simple - detects scenes and saves to Aegisub format (default)
-scenecut "input.mkv"
+# Default — writes Aegisub keyframes next to the input
+scenecut input.mkv
 
-# Specify custom output filename
-scenecut "video.mkv" -o keyframes.txt
+# Formats
+scenecut video.mp4 -f json -o scenes.json
+scenecut video.mp4 -f csv  -o scenes.csv
+scenecut video.mp4 -f timecode -o timecodes.txt
 
-# For timecode output
-scenecut "video.mp4" --format timecode -o timecodes.txt
-
-# JSON format with full metadata, confidence, and duration
-scenecut "movie.avi" --format json
-
-# CSV format for spreadsheet analysis
-scenecut "movie.avi" --format csv -o scenes.csv
-
-# High sensitivity for subtle scene changes
-scenecut "anime.mkv" --sensitivity high --verbose
+# Higher sensitivity for subtle transitions
+scenecut anime.mkv -s high -v
 
 # Abort after 2 minutes
-scenecut "long-movie.mkv" --timeout 120
+scenecut long-movie.mkv -t 120
 
-# Extract scene thumbnails
-scenecut "video.mp4" --thumbnails ./thumbs
+# Scene thumbnails
+scenecut video.mp4 --thumbnails ./thumbs
 ```
 
-### CLI Options
+### Options
 
 | Option | Alias | Description | Default |
 |--------|-------|-------------|---------|
-| `--format` | `-f` | Output format: `aegisub`, `json`, `csv`, `timecode` | `aegisub` |
-| `--output` | `-o` | Output file path | `{filename}_keyframes.txt` |
-| `--sensitivity` | `-s` | Detection sensitivity: `low`, `medium`, `high` | `low` |
-| `--timeout` | `-t` | Abort after N seconds | no timeout |
-| `--thumbnails` | | Extract scene thumbnails to directory | - |
-| `--quiet` | `-q` | Suppress progress output | `false` |
-| `--verbose` | `-v` | Show detailed output including confidence | `false` |
-| `--help` | `-h` | Show help message | - |
+| `--format` | `-f` | `aegisub` \| `json` \| `csv` \| `timecode` | `aegisub` |
+| `--output` | `-o` | Output path | `{filename}_keyframes.txt` |
+| `--sensitivity` | `-s` | `low` \| `medium` \| `high` | `low` |
+| `--timeout` | `-t` | Abort after N seconds | off |
+| `--thumbnails` | | Output thumbnail dir | — |
+| `--quiet` | `-q` | Suppress progress | — |
+| `--verbose` | `-v` | Show per-scene confidence | — |
 
-### Sensitivity Levels
+### Sensitivity
 
-| Level | IntraThresh | IntraThresh2 | Use case |
-|-------|------------|-------------|----------|
-| `low` | 3000 | 150 | Fewer detections, only hard cuts (default) |
-| `medium` | 2000 | 90 | Balanced |
-| `high` | 1000 | 50 | More detections, catches subtle transitions |
+| Level | Base threshold | When to use |
+|-------|---------------|-------------|
+| `low`    | sSAD ≥ 150 | Hard cuts only. Default. Robust on compressed/noisy footage. |
+| `medium` | sSAD ≥ 90  | Balanced. |
+| `high`   | sSAD ≥ 50  | Catches subtle transitions. More false positives on noise. |
 
-## Output Formats
-
-### Aegisub Format (`.txt`)
-
-Aegisub keyframes format for subtitle timing:
-
-```
-# keyframe format v1
-fps 23.976
-0
-143
-287
-```
-
-**Aegisub Workflow:**
-1. Generate keyframes: `scenecut "video.mkv" -f aegisub -o keyframes.txt`
-2. In Aegisub: **Video** > **Open Keyframes** > Select `keyframes.txt`
-3. Keyframes appear as visual markers on the timeline for precise subtitle timing
-
-### CSV Format (`.csv`)
-
-Includes confidence scores and scene durations:
-
-```csv
-frame,timestamp,timecode,confidence,duration,frameCount
-0,0.0,00:00:00.000,1.0000,5.964,143
-143,5.964,00:00:05.964,0.7234,6.006,144
-287,11.970,00:00:11.970,0.8912,4.171,100
-```
-
-### JSON Format (`.json`)
-
-Complete metadata with confidence, duration, and codec info:
-
-```json
-{
-  "scenes": [
-    {
-      "frameNumber": 0,
-      "timestamp": 0.0,
-      "timecode": "00:00:00.000",
-      "confidence": 1.0,
-      "duration": 5.964,
-      "frameCount": 143
-    },
-    {
-      "frameNumber": 143,
-      "timestamp": 5.964,
-      "timecode": "00:00:05.964",
-      "confidence": 0.7234,
-      "duration": 6.006,
-      "frameCount": 144
-    }
-  ],
-  "metadata": {
-    "totalFrames": 3000,
-    "duration": 125.08,
-    "fps": 23.976,
-    "resolution": { "width": 1920, "height": 1080 },
-    "codec": "h264",
-    "pixelFormat": "yuv420p",
-    "bitrate": 5000000
-  },
-  "stats": {
-    "processingTime": 28.5,
-    "framesPerSecond": 105.2
-  }
-}
-```
-
-### Timecode Format (`.txt`)
-
-Simple timecode list (HH:MM:SS.mmm):
-
-```
-00:00:00.000
-00:00:05.964
-00:00:11.970
-```
+The base threshold is the starting point. During the first ~2 seconds of video, scenecut measures the noise floor and nudges the threshold upward if the content is noisier than expected, capped at 4× the base.
 
 ## Programmatic API
 
-### Basic Usage
-
-```javascript
+```js
 const { detectSceneChanges } = require('@doedja/scenecut');
 
-const results = await detectSceneChanges('input.mp4');
-
-console.log(`Found ${results.scenes.length} scenes`);
-results.scenes.forEach(scene => {
-  console.log(`Scene at ${scene.timecode} (confidence: ${(scene.confidence * 100).toFixed(0)}%, duration: ${scene.duration?.toFixed(1)}s)`);
-});
-```
-
-### Advanced Usage
-
-```javascript
-const { detectSceneChanges } = require('@doedja/scenecut');
-
-const controller = new AbortController();
-
-// Auto-cancel after 60 seconds
-setTimeout(() => controller.abort(), 60000);
-
-const results = await detectSceneChanges('input.mp4', {
-  sensitivity: 'high',
-  searchRange: 'medium',
-  signal: controller.signal,
-
-  // Temporal smoothing to reduce false positives
-  temporalSmoothing: {
-    enabled: true,
-    windowSize: 5,
-    minConsecutive: 2
-  },
-
-  onProgress: (progress) => {
-    console.log(`${progress.percent}% | ${progress.fps?.toFixed(1)} fps | ETA: ${progress.eta?.toFixed(0)}s | ${progress.scenesDetected} scenes`);
-  },
-
-  onScene: (scene) => {
-    console.log(`Scene at frame ${scene.frameNumber} (${scene.timecode}) confidence: ${scene.confidence?.toFixed(2)}`);
-  }
+const result = await detectSceneChanges('input.mp4', {
+  sensitivity: 'low',      // optional — 'low' | 'medium' | 'high'
+  searchRange: 'auto',     // optional — 'auto' | 'small' | 'medium' | 'large'
+  onProgress: (p) => console.log(`${p.percent}% — ${p.fps?.toFixed(1)} fps`),
+  onScene:    (s) => console.log(`cut @ ${s.timecode} conf=${s.confidence?.toFixed(2)}`)
 });
 
-console.log(`Total scenes: ${results.scenes.length}`);
-console.log(`Video: ${results.metadata.codec} ${results.metadata.resolution.width}x${results.metadata.resolution.height}`);
+console.log(`${result.scenes.length} scenes`);
 ```
 
-### Extract Scene Thumbnails
+### Options
 
-```javascript
-const { extractSceneImages } = require('@doedja/scenecut');
-
-const results = await extractSceneImages('input.mp4', {
-  sensitivity: 'low'
-}, {
-  outputDir: './thumbnails',
-  format: 'jpg',
-  quality: 85,
-  filenameTemplate: 'scene_{frame}'
-});
+```ts
+interface DetectionOptions {
+  sensitivity?: 'low' | 'medium' | 'high';          // default: 'low'
+  searchRange?: 'auto' | 'small' | 'medium' | 'large'; // default: 'auto'
+  onProgress?: (p: Progress) => void;
+  onScene?: (s: SceneInfo) => void;
+  format?: 'json' | 'csv' | 'edl';
+  signal?: AbortSignal;
+}
 ```
 
-### API Reference
+That's the full surface. Everything else — fade detection, temporal smoothing, adaptive thresholding, confidence calibration — is on by default and sized automatically from the video's fps and noise characteristics.
 
-#### `detectSceneChanges(videoPath, options?)`
+### Result
 
-Detects scene changes in a video file.
-
-**Parameters:**
-- `videoPath` (string): Path to input video file
-- `options` (DetectionOptions, optional):
-  - `sensitivity` ('low' | 'medium' | 'high' | 'custom'): Detection sensitivity
-  - `customThresholds` ({ intraThresh, intraThresh2 }): Custom threshold values (when sensitivity='custom')
-  - `searchRange` ('auto' | 'small' | 'medium' | 'large'): Motion search range
-  - `signal` (AbortSignal): For cancellation support
-  - `temporalSmoothing` ({ enabled, windowSize, minConsecutive }): Temporal smoothing config
-  - `onProgress` (function): Progress callback with fps, eta, scenesDetected
-  - `onScene` (function): Callback for each detected scene
-
-**Returns:** `Promise<DetectionResult>`
-
-```typescript
+```ts
 interface DetectionResult {
   scenes: Array<{
     frameNumber: number;
-    timestamp: number;        // Seconds
-    timecode: string;         // HH:MM:SS.mmm
-    confidence: number;       // 0-1
-    duration: number;         // Seconds until next scene
-    frameCount: number;       // Frames until next scene
+    timestamp: number;     // seconds
+    timecode: string;      // HH:MM:SS.mmm
+    confidence: number;    // 0–1 (sigmoid-calibrated)
+    duration: number;      // seconds until next scene
+    frameCount: number;
   }>;
   metadata: {
     totalFrames: number;
@@ -270,62 +125,63 @@ interface DetectionResult {
 }
 ```
 
-#### `extractSceneImages(videoPath, options?, imageOptions?)`
+### Thumbnails
 
-Detects scenes and extracts thumbnail images in a single FFmpeg pass.
+```js
+const { extractSceneImages } = require('@doedja/scenecut');
 
-**Additional parameter:**
-- `imageOptions` (FrameImageOptions):
-  - `outputDir` (string): Output directory
-  - `format` ('jpg' | 'png' | 'bmp'): Image format
-  - `quality` (number): JPEG quality 1-100
-  - `width` (number): Output width (maintains aspect ratio)
-  - `filenameTemplate` (string): Use `{frame}` and `{timestamp}` placeholders
+await extractSceneImages('input.mp4',
+  { sensitivity: 'low' },
+  { outputDir: './thumbs', format: 'jpg', quality: 85 }
+);
+```
 
-## How It Works
+### Cancellation
 
-1. **Frame Extraction**: FFmpeg extracts grayscale frames via streaming ring buffer with zero-copy alternating buffers
-2. **Quick Reject**: Sampled pixel comparison (every 64th pixel) skips nearly-identical frames without touching WASM
-3. **Motion Analysis**: WebAssembly-compiled Xvid motion estimation with configurable thresholds and SIMD acceleration
-4. **Confidence Scoring**: Raw sSAD scores are normalized to 0-1 confidence values
-5. **Fade Detection**: Drift comparison against last keyframe catches gradual dissolves lasting 30+ frames
-6. **Temporal Smoothing**: Optional sliding window filter suppresses flashes and merges detection clusters
-7. **Double Buffering**: Previous frame stays in WASM memory between calls, halving memory copies
+```js
+const ctrl = new AbortController();
+setTimeout(() => ctrl.abort(), 60_000);
+
+await detectSceneChanges('input.mp4', { signal: ctrl.signal });
+```
+
+## How it works
+
+1. **Decode**: FFmpeg streams grayscale frames via a zero-copy ring buffer into pre-allocated double buffers.
+2. **Fused pass (per frame, JS)**: one walk over sampled pixels computes (a) MAD vs. previous frame for quick-reject, (b) drift vs. an EMA reference for fade detection, and (c) updates the EMA in place.
+3. **Gate**: if both MAD and drift are below thresholds, WASM is skipped entirely (≈80% of frames on typical content).
+4. **Motion estimation (WASM)**: Xvid's MEanalysis with diamond + subpel refinement, resolution-scaled intra-count boost, SIMD SAD. Returns a raw sSAD score.
+5. **Sigmoid calibration**: rawScore → p_cut ∈ [0, 1]. 0.5 at threshold, ≥ 0.95 at 2× threshold.
+6. **Fade rescue**: if p_cut is borderline but drift is elevated, the score is re-calibrated against a lower threshold. No second WASM call.
+7. **Adaptive warmup**: the first ~2 s of raw scores set the noise floor. The threshold is shifted up if the content is noisier than the sensitivity default (capped at 4×).
+8. **Smoother (online NMS)**: candidates are buffered over a refractory window (≈0.25 s by default). Only the highest-probability cut per window is emitted, with a small lookahead so a stronger candidate a few frames later can override an earlier weaker one.
 
 ## Performance
 
-- **Processing speed**: 80-150+ fps on 1080p video (with quick-reject, most frames skip WASM entirely)
-- **Memory usage**: ~200-300 MB with pre-allocated WASM buffers and buffer pooling
-- **4K support**: Auto-sized ring buffer scales to any resolution
-- **Optimizations**: WASM SIMD, double-buffered frames, pre-allocated macroblock array, zero-alloc frame extraction, quick-reject filtering
+Measured on an M-series Mac, 1080p h.264 24 fps anime:
+
+- **Speed**: ~170 fps sustained on 24-min 1080p episode (single-threaded JS + WASM).
+- **Memory**: ~200–300 MB, mostly pre-allocated WASM buffers and the EMA reference.
+- **Skips WASM** for ~80% of frames via the quick-reject + drift gate.
 
 ## Requirements
 
-- **Node.js**: 18.0.0 or higher
-- **FFmpeg & FFprobe**: Automatically installed via `@ffmpeg-installer/ffmpeg` and `@ffprobe-installer/ffprobe`
+- Node.js ≥ 18
+- FFmpeg and FFprobe (bundled via `@ffmpeg-installer/ffmpeg` and `@ffprobe-installer/ffprobe`)
 
-## Building from Source
+## Build from source
 
 ```bash
-# Install dependencies
 npm install
-
-# Build WASM (requires Emscripten SDK)
-npm run build:wasm
-
-# Build TypeScript + bundle
-npm run build
+npm run build:wasm    # requires emcc (Emscripten SDK or `brew install emscripten`)
+npm run build         # tsc + rollup
 ```
 
 ## License
 
-GPL-2.0
-
-This project is based on:
-- [vapoursynth-wwxd](https://github.com/dubhater/vapoursynth-wwxd) by dubhater (GPL-2.0)
-- Xvid's motion estimation algorithm (GPL-2.0)
+GPL-2.0 — derived from [vapoursynth-wwxd](https://github.com/dubhater/vapoursynth-wwxd) (dubhater) and the Xvid motion estimation algorithm.
 
 ## Credits
 
-- Original vapoursynth-wwxd plugin: [dubhater](https://github.com/dubhater)
-- Xvid motion estimation algorithm: [Xvid Team](https://www.xvid.com)
+- vapoursynth-wwxd by [dubhater](https://github.com/dubhater)
+- Xvid motion estimation ([xvid.com](https://www.xvid.com))
