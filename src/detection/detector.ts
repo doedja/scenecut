@@ -99,7 +99,10 @@ export class SceneDetector {
     // EMA decays slowly enough to accumulate fade drift but fast enough to
     // absorb stable content. alpha=0.03 ≈ 33-frame effective window.
     const frameSize = metadata.resolution.width * metadata.resolution.height;
-    const emaStride = 4; // sample every 4th pixel; matches old drift cost
+    // Sample every 16th pixel. α=0.03 converges over ~33 frames, so stride-4
+    // granularity is wasted — 16 still captures fade drift accurately and
+    // cuts the per-frame JS work 4×.
+    const emaStride = 16;
     const emaSamples = Math.floor(frameSize / emaStride);
     const emaRef = new Float32Array(emaSamples);
     const emaAlpha = 0.03;
