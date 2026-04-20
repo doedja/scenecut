@@ -1,79 +1,29 @@
 {
-  "name": "@doedja/scenecut",
-  "version": "2.0.1",
-  "description": "Scene change detection for Node.js using Xvid's motion estimation algorithm",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "bin": {
-    "scenecut": "./bin/cli.js"
-  },
-  "exports": {
-    ".": {
-      "import": "./dist/keyframes.esm.js",
-      "require": "./dist/keyframes.cjs.js",
-      "types": "./dist/index.d.ts"
-    }
-  },
-  "files": [
-    "dist",
-    "bin",
-    "README.md",
-    "LICENSE"
+  "name": "scenecut-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "scenecut monorepo — core (WASM + detector), node (@doedja/scenecut), web (@doedja/scenecut-web), apps/web (browser app)",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
   ],
   "scripts": {
-    "build:wasm": "cd src/wasm && bash build.sh",
-    "build:ts": "tsc",
-    "build:bundle": "rollup -c",
-    "build": "npm run build:ts && npm run build:bundle",
-    "dev": "tsc --watch",
-    "test": "node test-basic.js",
-    "test:full": "node test-full.js",
-    "lint": "eslint src/**/*.ts",
-    "format": "prettier --write \"src/**/*.{ts,js}\"",
-    "prepublishOnly": "npm run build",
-    "release": "npm version patch && npm publish --access public"
+    "build:core": "bun --filter='./packages/core' run build",
+    "build:core:ts": "bun --filter='./packages/core' run build:ts",
+    "build:core:wasm": "bun --filter='./packages/core' run build:wasm",
+    "build:node": "bun --filter='./packages/node' run build",
+    "build:web": "bun --filter='./packages/web' run build",
+    "build:app": "bun --filter='./apps/web' run build",
+    "build": "bun run build:core && bun run build:node && bun run build:web && bun run build:app",
+    "dev:app": "bun --filter='./apps/web' run dev",
+    "clean": "rm -rf packages/*/dist apps/*/dist"
   },
-  "keywords": [
-    "scene-detection",
-    "video",
-    "keyframe",
-    "xvid",
-    "ffmpeg",
-    "video-processing",
-    "motion-estimation",
-    "wasm",
-    "webassembly"
-  ],
-  "author": "doedja",
   "license": "GPL-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/doedja/scenecut.git"
   },
-  "bugs": {
-    "url": "https://github.com/doedja/scenecut/issues"
-  },
-  "homepage": "https://github.com/doedja/scenecut#readme",
-  "dependencies": {
-    "@ffmpeg-installer/ffmpeg": "^1.1.0",
-    "@ffprobe-installer/ffprobe": "^2.1.2",
-    "fluent-ffmpeg": "^2.1.2"
-  },
   "devDependencies": {
-    "@rollup/plugin-commonjs": "^25.0.7",
-    "@rollup/plugin-node-resolve": "^15.2.3",
-    "@rollup/plugin-typescript": "^11.1.5",
-    "@types/fluent-ffmpeg": "^2.1.24",
-    "@types/node": "^20.10.0",
-    "@typescript-eslint/eslint-plugin": "^6.19.0",
-    "@typescript-eslint/parser": "^6.19.0",
-    "eslint": "^8.56.0",
-    "prettier": "^3.1.0",
-    "rollup": "^4.9.0",
-    "typescript": "^5.3.0",
-    "vitest": "^1.0.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "typescript": "^5.3.0"
   }
 }

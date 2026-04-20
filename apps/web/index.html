@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <title>scenecut — scene change detection in the browser</title>
+  <meta name="description" content="Detect scene cuts in video files without uploading. Xvid motion estimation runs in WebAssembly, locally." />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='3' y='4' width='3' height='3' fill='%23c9d650'/><rect x='3' y='10' width='3' height='4' fill='%23c9d650'/><rect x='3' y='17' width='3' height='3' fill='%23c9d650'/><rect x='18' y='4' width='3' height='3' fill='%23c9d650'/><rect x='18' y='10' width='3' height='4' fill='%23c9d650'/><rect x='18' y='17' width='3' height='3' fill='%23c9d650'/><rect x='8' y='4' width='8' height='16' fill='none' stroke='%23c9d650' stroke-width='1.5'/></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    /* Critical CSS — prevents FOUC on first paint while the main stylesheet loads.
+       Matches style.css variables so the transition is invisible. */
+    html, body {
+      margin: 0;
+      background: #0a0a0b;
+      color: #e8e6df;
+      font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      color-scheme: dark;
+    }
+    [hidden] { display: none !important; }
+    body { opacity: 0; transition: opacity 120ms ease-out; }
+    body.is-ready { opacity: 1; }
+  </style>
+  <script>
+    // Reveal body once CSS + fonts are painted at least once.
+    document.addEventListener('DOMContentLoaded', () => {
+      requestAnimationFrame(() => document.body.classList.add('is-ready'));
+    });
+  </script>
+</head>
+<body>
+  <div id="app">
+
+    <header class="topbar" role="banner">
+      <div class="brand" aria-label="scenecut">
+        <svg class="brand-mark" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <rect x="3" y="4" width="3" height="3" />
+          <rect x="3" y="10" width="3" height="4" />
+          <rect x="3" y="17" width="3" height="3" />
+          <rect x="18" y="4" width="3" height="3" />
+          <rect x="18" y="10" width="3" height="4" />
+          <rect x="18" y="17" width="3" height="3" />
+          <rect x="8" y="4" width="8" height="16" fill="none" stroke="currentColor" stroke-width="1.25" />
+        </svg>
+        <span class="brand-name">scenecut</span>
+        <span class="brand-version" aria-hidden="true">v3.0</span>
+      </div>
+      <nav class="topnav">
+        <a href="https://github.com/doedja/scenecut" target="_blank" rel="noreferrer">source</a>
+        <span class="sep" aria-hidden="true">·</span>
+        <a href="#about" data-scroll="about">about</a>
+      </nav>
+    </header>
+
+    <main>
+
+      <!-- EMPTY STATE: dropzone when queue is empty -->
+      <section class="workspace empty" id="empty-state" role="region" aria-label="drop a video">
+        <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="drop videos or click to browse">
+          <div class="dropzone-inner">
+            <svg class="dropzone-mark" width="38" height="28" viewBox="0 0 38 28" aria-hidden="true">
+              <rect x="1" y="1" width="36" height="26" fill="none" stroke="currentColor" stroke-width="1"/>
+              <rect x="3.5" y="3.5" width="3" height="3" />
+              <rect x="3.5" y="21" width="3" height="3" />
+              <rect x="31.5" y="3.5" width="3" height="3" />
+              <rect x="31.5" y="21" width="3" height="3" />
+              <line x1="10" y1="14" x2="28" y2="14" stroke="currentColor" stroke-width="1" />
+            </svg>
+            <p class="dropzone-primary">
+              drop a video file<span class="muted"> · or </span><button type="button" class="link" id="browse-btn">browse</button>
+            </p>
+            <p class="dropzone-hint">mp4 · mov · webm · mkv · drop multiple to batch-process</p>
+            <input type="file" id="file-input" accept="video/*" hidden multiple />
+          </div>
+        </div>
+      </section>
+
+      <!-- ACTIVE STATE: top bar (settings + detect) → queue → selected detail -->
+      <section class="workspace active" id="active-state" hidden>
+
+        <div class="topbar-controls">
+          <div class="ctrl-group">
+            <span class="ctrl-label-inline">sensitivity</span>
+            <div class="segmented" role="radiogroup" aria-label="sensitivity" data-group="sensitivity">
+              <button type="button" class="seg" data-value="low" role="radio" aria-checked="false">low</button>
+              <button type="button" class="seg is-active" data-value="medium" role="radio" aria-checked="true">medium</button>
+              <button type="button" class="seg" data-value="high" role="radio" aria-checked="false">high</button>
+            </div>
+          </div>
+          <div class="ctrl-group">
+            <span class="ctrl-label-inline">max dim</span>
+            <div class="segmented" role="radiogroup" aria-label="max dimension" data-group="maxDim">
+              <button type="button" class="seg is-active" data-value="0" role="radio" aria-checked="true">off</button>
+              <button type="button" class="seg" data-value="1080" role="radio" aria-checked="false">1080p</button>
+              <button type="button" class="seg" data-value="720" role="radio" aria-checked="false">720p</button>
+            </div>
+          </div>
+          <div class="ctrl-spacer"></div>
+          <button type="button" class="btn-ghost" id="cancel-btn" hidden>cancel</button>
+          <button type="button" class="btn-primary compact" id="detect-btn" disabled>
+            <span class="btn-label">detect queue</span>
+            <span class="btn-arrow" aria-hidden="true">→</span>
+          </button>
+        </div>
+
+        <div class="queue-panel">
+          <header class="queue-head">
+            <h3 class="queue-title">
+              queue <span class="queue-count" id="queue-count">0</span>
+            </h3>
+            <div class="queue-actions">
+              <button type="button" class="btn-link" id="add-more-btn">+ add files</button>
+              <span class="queue-sep" aria-hidden="true">·</span>
+              <button type="button" class="btn-link" id="clear-done-btn">clear done</button>
+              <span class="queue-sep" aria-hidden="true">·</span>
+              <button type="button" class="btn-link btn-danger" id="clear-all-btn">clear all</button>
+            </div>
+          </header>
+          <ul class="queue-list" id="queue-list" role="list"></ul>
+        </div>
+
+      </section>
+
+      <section class="detail" id="results" hidden>
+
+        <header class="detail-head">
+          <div class="detail-file" id="results-file">—</div>
+          <nav class="export" aria-label="export results">
+            <span class="export-label muted">export</span>
+            <button type="button" data-export="edl" title="CMX3600 — Premiere, Resolve, Avid">edl</button>
+            <button type="button" data-export="fcpxml" title="Final Cut Pro XML">fcpxml</button>
+            <button type="button" data-export="premiere" title="Premiere Pro Import Markers CSV">premiere</button>
+            <span class="export-divider" aria-hidden="true"></span>
+            <button type="button" data-export="aegisub" title="Aegisub keyframes">aegisub</button>
+            <button type="button" data-export="timecode" title="Plain timecode list">timecode</button>
+            <button type="button" data-export="csv" title="Generic CSV">csv</button>
+            <button type="button" data-export="json" title="Full JSON">json</button>
+          </nav>
+        </header>
+
+        <div class="detail-grid">
+          <aside class="detail-preview" id="preview" hidden>
+            <div class="preview-frame">
+              <video id="video" preload="metadata" controls playsinline></video>
+            </div>
+            <dl class="preview-meta" id="preview-meta">
+              <div class="meta-cell"><dt>size</dt><dd id="meta-size">—</dd></div>
+              <div class="meta-cell"><dt>resolution</dt><dd id="meta-res">—</dd></div>
+              <div class="meta-cell"><dt>duration</dt><dd id="meta-dur">—</dd></div>
+              <div class="meta-cell"><dt>file</dt><dd id="meta-name">—</dd></div>
+            </dl>
+          </aside>
+
+          <div class="table-scroll">
+            <table class="scene-table">
+              <thead>
+                <tr>
+                  <th class="col-num" scope="col">#</th>
+                  <th class="col-frame" scope="col">frame</th>
+                  <th class="col-time" scope="col">timecode</th>
+                  <th class="col-dur" scope="col">duration</th>
+                </tr>
+              </thead>
+              <tbody id="scene-tbody"></tbody>
+            </table>
+            <div class="results-empty" id="results-empty" hidden>
+              <p class="muted">no scenes yet</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="about" id="about">
+        <h2 class="about-title">what this gives you</h2>
+        <div class="about-lede">
+          <p>
+            scenecut finds <em>keyframes</em> &mdash; the exact frame numbers and timestamps
+            where the video cuts from one shot to another. think of them as markers on your
+            timeline: every place a new scene begins.
+          </p>
+        </div>
+        <div class="about-uses">
+          <h3 class="uses-title">useful for</h3>
+          <ul class="uses-list">
+            <li><span class="use-tag">editors</span> export edl, fcpxml, or premiere markers &mdash; drop straight into your timeline</li>
+            <li><span class="use-tag">subtitles</span> snap dialogue lines to scene boundaries so cues don't straddle cuts</li>
+            <li><span class="use-tag">encoding</span> seed x264 / x265 keyframe hints so your i-frames land on real cuts</li>
+            <li><span class="use-tag">archival</span> chapter markers, shot indexing, continuity reports</li>
+          </ul>
+        </div>
+        <p class="about-note">
+          the same detector ships as <code>@doedja/scenecut</code> on npm for node, with a
+          cli (<code>scenecut video.mkv --format edl</code>). all exports available in both.
+          <a href="https://github.com/doedja/scenecut" target="_blank" rel="noreferrer">source on github</a>.
+        </p>
+      </section>
+
+    </main>
+
+    <footer class="footer" role="contentinfo">
+      <div class="footer-left muted">
+        <span class="dot" aria-hidden="true"></span>
+        all processing is local · no uploads · your video never leaves this tab
+      </div>
+      <div class="footer-right muted">
+        gpl-2.0 · <a href="https://github.com/doedja/scenecut" target="_blank" rel="noreferrer">github</a>
+      </div>
+    </footer>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <!-- Global drop overlay shown when dragging files over the page -->
+    <div class="drop-overlay" id="drop-overlay" hidden>
+      <div class="drop-overlay-inner">
+        <svg width="64" height="48" viewBox="0 0 38 28" aria-hidden="true">
+          <rect x="1" y="1" width="36" height="26" fill="none" stroke="currentColor" stroke-width="1"/>
+          <rect x="3.5" y="3.5" width="3" height="3" />
+          <rect x="3.5" y="21" width="3" height="3" />
+          <rect x="31.5" y="3.5" width="3" height="3" />
+          <rect x="31.5" y="21" width="3" height="3" />
+          <line x1="10" y1="14" x2="28" y2="14" stroke="currentColor" stroke-width="1" />
+        </svg>
+        <p>drop to add to queue</p>
+      </div>
+    </div>
+
+  </div>
+
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>

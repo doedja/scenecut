@@ -1,0 +1,46 @@
+{
+  "name": "@doedja/scenecut-core",
+  "version": "0.1.0",
+  "description": "Platform-agnostic scene detection: Xvid motion estimation WASM + detector orchestrator",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./wasm": "./dist/detection.wasm.js",
+    "./wasm-binary": "./dist/detection.wasm"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "src/wasm",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:wasm": "bash src/wasm/build.sh",
+    "build:ts": "tsc",
+    "build": "bun run build:wasm && bun run build:ts",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "scene-detection",
+    "video",
+    "keyframe",
+    "xvid",
+    "motion-estimation",
+    "wasm"
+  ],
+  "author": "doedja",
+  "license": "GPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/doedja/scenecut.git",
+    "directory": "packages/core"
+  }
+}
