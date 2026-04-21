@@ -1,12 +1,12 @@
 {
   "name": "@doedja/scenecut",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "Scene change detection for Node.js using Xvid's motion estimation algorithm",
   "main": "dist/scenecut.cjs.js",
   "module": "dist/scenecut.esm.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "scenecut": "./bin/cli.js"
+    "scenecut": "bin/cli.js"
   },
   "exports": {
     ".": {

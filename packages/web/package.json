@@ -1,6 +1,6 @@
 {
   "name": "@doedja/scenecut-web",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Browser scene change detection. Uses WebCodecs-adjacent video decode + @doedja/scenecut-core WASM motion estimation.",
   "main": "dist/index.js",
   "module": "dist/index.js",
