@@ -9,6 +9,12 @@ build/
 *.wasm
 *.wasm.js
 
+# Commit the prebuilt WASM at its serving location so CF Pages / GH Pages
+# don't need emscripten in their build image. Regenerate when C src changes.
+!apps/web/public/wasm/
+!apps/web/public/wasm/detection.wasm
+!apps/web/public/wasm/detection.wasm.js
+
 # TypeScript
 *.tsbuildinfo
 
