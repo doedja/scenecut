@@ -15,6 +15,7 @@
     "build:web": "bun --filter='./packages/web' run build",
     "build:app": "bun --filter='./apps/web' run build",
     "build": "bun run build:core && bun run build:node && bun run build:web && bun run build:app",
+    "build:site": "bun run build:core:ts && bun run build:web && bun run build:app",
     "dev:app": "bun --filter='./apps/web' run dev",
     "clean": "rm -rf packages/*/dist apps/*/dist"
   },

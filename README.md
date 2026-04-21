@@ -205,14 +205,14 @@ Cloudflare Pages auto-redeploys on every push once connected.
 1. **Connect the repo** in the Cloudflare dashboard: *Workers & Pages → Create → Pages → Connect to Git* and select this repo.
 2. **Build settings**:
    - Framework preset: `None`
-   - Build command: `npm install -g bun && bun install && bun run build:core:wasm && bun run build:app`
+   - Build command: `npm install -g bun && bun install && bun run build:site`
    - Build output directory: `apps/web/dist`
    - Root directory: `/` (leave blank)
 3. **Environment variables**:
    - `NODE_VERSION = 20` (or higher)
-4. **Save and deploy.** First build installs emscripten via `emsdk` automatically because the WASM build script looks up `/tmp/emsdk` — if CF doesn't have emcc in its image, add a step to install it, or (easier) commit the prebuilt `packages/core/dist/detection.wasm.js` and `.wasm` files and skip the `build:core:wasm` step.
+4. **Save and deploy.**
 
-For the simplest CF Pages setup that does **not** require emscripten in the build image: prebuild the WASM locally, commit the two artifacts to the repo, and use `bun install && bun run build:app` as the build command. See the section "Committing prebuilt WASM" if that matters.
+The `build:site` script compiles `@doedja/scenecut-core` (TS only, no WASM rebuild), then `@doedja/scenecut-web`, then the app. The WASM binaries live committed in `apps/web/public/wasm/` so the build image never needs emscripten.
 
 A `_headers` file lives in `apps/web/public/` for cache + security defaults; Pages picks it up automatically.
 
