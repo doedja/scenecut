@@ -10,8 +10,8 @@
     "preview": "vite preview --port 4173"
   },
   "dependencies": {
-    "@doedja/scenecut-core": "^0.1.6",
-    "@doedja/scenecut-web": "^0.1.6"
+    "@doedja/scenecut-core": "^0.1.7",
+    "@doedja/scenecut-web": "^0.1.7"
   },
   "devDependencies": {
     "typescript": "^5.3.0",

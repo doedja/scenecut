@@ -10,7 +10,7 @@ import { nodeWasmFactory } from './wasm-factory';
 import { createNodeMotionPool } from './worker-pool';
 import type { FrameImageOptions } from './types';
 
-export { SceneDetector, WasmBridge, SceneSmoother, calibratePCut } from '@doedja/scenecut-core';
+export { SceneDetector, WasmBridge, calibratePCut } from '@doedja/scenecut-core';
 export type {
   DetectionOptions,
   DetectionResult,
@@ -109,11 +109,11 @@ export function extractSceneImages(
   });
 }
 
-export const version = '3.0.6';
+export const version = '3.0.7';
 
 export const info = {
   name: 'scenecut',
-  version: '3.0.6',
+  version: '3.0.7',
   description: 'Scene change detection for Node.js using Xvid motion estimation',
   license: 'GPL-2.0',
   credits: {

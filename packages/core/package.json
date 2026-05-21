@@ -1,6 +1,6 @@
 {
   "name": "@doedja/scenecut-core",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Platform-agnostic scene detection: Xvid motion estimation WASM + detector orchestrator",
   "main": "dist/index.js",
   "module": "dist/index.js",

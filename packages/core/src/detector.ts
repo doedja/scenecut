@@ -1,28 +1,24 @@
 /**
  * Scene Detector: main orchestrator.
  *
- * Per-frame pipeline:
- *   1. Fast pre-pass (main thread): sampled MAD between prev and cur, plus
- *      sampled drift between cur and the last confirmed scene-cut frame.
- *   2. Gate: if MAD is below threshold, skip WASM entirely.
- *   3. WASM MEanalysis returns rawScore (inline WasmBridge or worker pool).
- *      rawScore is sigmoid-calibrated to p_cut.
- *   4. Fade rescue: when p_cut < 0.5 and drift-vs-keyframe is high, run a
- *      second WASM pass with thresholds * 0.6. The C code re-evaluates with
- *      the looser bar so rawScore actually changes.
- *   5. Emit immediately on p_cut >= 0.5. Confirmed scene frames flag a
- *      pending keyframe refresh; the next frame's bytes become the new
- *      drift reference. The C code's intraCount boost suppresses re-firing
- *      on the next ~30 frames so back-to-back duplicate emits do not happen.
+ * Per-frame pipeline matches v1.0.2 byte-for-byte in the single-thread path
+ * so its output reproduces v1's keyframes on the same ffmpeg-decoded input:
+ *   1. Pre-pass: sampled MAD between prev and cur at stride 64. If MAD < 5,
+ *      skip WASM entirely (matches v1's quick-reject).
+ *   2. WASM MEanalysis returns rawScore. Sigmoid-calibrated to p_cut.
+ *   3. Fade rescue: when p_cut < 0.5 and drift vs the last-cut keyframe (at
+ *      stride 4) is strictly > 30, re-run WASM with thresholds * 0.6.
+ *   4. Emit on p_cut >= 0.5. Scene timestamp uses the frame's own pts so it
+ *      matches the decoder (VFR-safe). Keyframe snapshot refreshes EAGERLY
+ *      to the cut frame's bytes for the next drift baseline.
  *
- * Worker pool path: main thread owns the pre-pass and keyframe state. Only
- * MEanalysis is dispatched. Results drain in frame order. Spare prev/cur
- * copies are stashed pre-dispatch only when drift is high enough that
- * rescue is plausible.
+ * Worker pool path: same shape, but WASM dispatches concurrently. Results
+ * drain in frame order via an inflight queue. The dispatched frame's bytes
+ * are gone by emit time, so the pool path falls back to a one-frame-lag
+ * lazy keyframe refresh (not v1-byte-identical; v1 had no pool).
  */
 
 import { WasmBridge, calibratePCut } from './wasm-bridge';
-import { SceneSmoother } from './scene-smoother';
 import type { MotionWorkerPool, AnalyzeResult } from './worker/pool';
 import {
   DetectionOptions,
@@ -44,8 +40,8 @@ import {
 export interface DetectorExtras {
   /**
    * Optional motion worker pool. When provided, WASM motion estimation runs
-   * in parallel across the pool and the main thread stays responsive. Main
-   * thread still owns pre-pass and keyframe state.
+   * in parallel across the pool. Main thread still owns pre-pass and
+   * keyframe state.
    */
   pool?: MotionWorkerPool;
 }
@@ -54,6 +50,7 @@ export type SceneDetectorOptions = DetectionOptions & DetectorExtras;
 
 interface PendingAnalysis {
   frameNumber: number;
+  pts: number;
   drift: number;
   promise: Promise<AnalyzeResult>;
   intraThreshAtDispatch: number;
@@ -78,7 +75,7 @@ export class SceneDetector {
   constructor(factory: WasmFactory, options: SceneDetectorOptions = {}) {
     this.options = {
       sensitivity: options.sensitivity || 'low',
-      searchRange: options.searchRange || 'auto',
+      searchRange: options.searchRange || 'medium',
       onProgress: options.onProgress || (() => {}),
       onScene: options.onScene || (() => {}),
       format: options.format || 'json',
@@ -115,11 +112,6 @@ export class SceneDetector {
       this.wasmBridge.allocateBuffers(metadata.resolution.width, metadata.resolution.height);
     }
 
-    // Smoother is configured to pass through (minGap=1, lookahead=0). The
-    // dedup it performs is a safety net only. The WASM intraCount boost in
-    // detection.c already suppresses re-firing on adjacent frames.
-    const smoother = new SceneSmoother({ minGap: 1, lookahead: 0, threshold: 0.5 });
-
     const scenes: SceneInfo[] = [{
       frameNumber: 0,
       timestamp: 0,
@@ -132,23 +124,18 @@ export class SceneDetector {
     let firstFrameValidated = false;
     const fpsWindow: { time: number; frame: number }[] = [];
 
-    // Drift reference: snapshot of the last confirmed scene-cut frame.
-    // This is the cumulative-since-cut measure, not a per-frame EMA. It does
-    // not chase fades or dissolves, so slow transitions stay visible.
+    // Drift reference: snapshot of the last confirmed scene-cut frame. v1.0.2
+    // uses eager refresh (cur bytes at emit). Pool path falls back to lazy.
     let keyframeData: Uint8Array | null = null;
-    // Set by emit(); the main loop snaps keyframe to the next frame's bytes.
-    // For pool path, emit happens after the dispatching frame is gone, so we
-    // cannot refresh from that frame's bytes directly. One-frame lag is fine.
     let pendingKeyframeRefresh = false;
 
-    // Gate: skip WASM only when prev->cur is essentially static.
-    // Threshold 1.5 keeps low-contrast cuts (talking-head A->B, similar-lit
-    // reverse shots) reaching WASM where motion estimation can resolve them.
+    // v1.0.2 quick-reject: stride 64, threshold 5. Skip WASM when prev->cur
+    // is essentially static.
     const gateStride = 64;
-    const gateMad = 1.5;
+    const gateMad = 5;
 
-    // Drift threshold for fade rescue (vs keyframeData). Stride 4 captures
-    // localized changes (subtitles, lower-thirds, character entry).
+    // v1.0.2 drift sample at stride 4 against last-cut keyframe. Rescue fires
+    // when drift is strictly > 30 (matches v1's `if (driftAvg > 30)`).
     const driftStride = 4;
     const driftRescue = 30;
     const fadeFactor = 0.6;
@@ -162,27 +149,52 @@ export class SceneDetector {
       keyframeData = data.slice();
     };
 
-    const emit = (frameNumber: number, pCut: number): void => {
-      const emissions = smoother.observe(frameNumber, pCut);
-      for (const e of emissions) {
+    const emitInline = (
+      frameNumber: number,
+      pts: number,
+      pCut: number,
+      curData: Uint8Array
+    ): void => {
+      if (pCut >= 0.5) {
         const scene: SceneInfo = {
-          frameNumber: e.frameNumber,
-          timestamp: e.frameNumber / metadata.fps,
-          timecode: formatTimecode(e.frameNumber / metadata.fps),
-          confidence: e.confidence
+          frameNumber,
+          timestamp: pts,
+          timecode: formatTimecode(pts),
+          confidence: pCut
+        };
+        scenes.push(scene);
+        this.options.onScene(scene);
+        this.state.intraCount = 1;
+        refreshKeyframe(curData);
+      } else {
+        this.state.intraCount++;
+      }
+    };
+
+    const emitFromPool = (
+      frameNumber: number,
+      pts: number,
+      pCut: number
+    ): void => {
+      if (pCut >= 0.5) {
+        const scene: SceneInfo = {
+          frameNumber,
+          timestamp: pts,
+          timecode: formatTimecode(pts),
+          confidence: pCut
         };
         scenes.push(scene);
         this.options.onScene(scene);
         this.state.intraCount = 1;
         pendingKeyframeRefresh = true;
-      }
-      if (emissions.length === 0) {
+      } else {
         this.state.intraCount++;
       }
     };
 
     const commitInline = (
       frameNumber: number,
+      pts: number,
       rawScore: number,
       drift: number,
       dispatchedThresh: number,
@@ -194,7 +206,7 @@ export class SceneDetector {
       curData: Uint8Array
     ): void => {
       let pCut = calibratePCut(rawScore, dispatchedThresh2);
-      if (pCut < 0.5 && keyframeData && drift >= driftRescue) {
+      if (pCut < 0.5 && keyframeData && drift > driftRescue) {
         const fadeThresh = Math.round(dispatchedThresh * fadeFactor);
         const fadeThresh2 = Math.round(dispatchedThresh2 * fadeFactor);
         const fadeRes = this.wasmBridge.detectSceneChangeStateless(
@@ -203,12 +215,11 @@ export class SceneDetector {
           fadeThresh, fadeThresh2
         );
         // Stateless overwrites both slots, so reset double-buffer state.
-        // The next regular call will re-pad prev fresh.
         this.wasmBridge.resetBufferState();
         const pCutFade = calibratePCut(fadeRes.rawScore, fadeThresh2);
         if (pCutFade > pCut) pCut = pCutFade;
       }
-      emit(frameNumber, pCut);
+      emitInline(frameNumber, pts, pCut, curData);
     };
 
     const commitFromPool = async (head: PendingAnalysis): Promise<void> => {
@@ -216,7 +227,7 @@ export class SceneDetector {
       let pCut = calibratePCut(result.rawScore, head.intraThresh2AtDispatch);
       if (
         pCut < 0.5 &&
-        head.drift >= driftRescue &&
+        head.drift > driftRescue &&
         head.prevSpare &&
         head.curSpare &&
         pool
@@ -236,7 +247,7 @@ export class SceneDetector {
         const pCutFade = calibratePCut(fadeRes.rawScore, fadeThresh2);
         if (pCutFade > pCut) pCut = pCutFade;
       }
-      emit(head.frameNumber, pCut);
+      emitFromPool(head.frameNumber, head.pts, pCut);
     };
 
     const drainOne = async (): Promise<void> => {
@@ -258,9 +269,8 @@ export class SceneDetector {
           firstFrameValidated = true;
         }
 
-        // Lazy keyframe refresh: snap to the current frame's bytes when a
-        // recent emit flagged it. This is one frame after the actual cut,
-        // close enough for cumulative drift to be meaningful.
+        // Pool path lazy refresh: snap keyframe to this frame's bytes if a
+        // recent pool emit flagged it. One frame after the actual cut.
         if (pendingKeyframeRefresh) {
           refreshKeyframe(frame.data);
           pendingKeyframeRefresh = false;
@@ -296,7 +306,7 @@ export class SceneDetector {
           }
 
           if (mad >= gateMad) {
-            const needsRescueStash = drift >= driftRescue;
+            const needsRescueStash = drift > driftRescue;
 
             if (pool) {
               const prevCopy = prevData.slice();
@@ -319,6 +329,7 @@ export class SceneDetector {
               });
               inflight.push({
                 frameNumber: frame.frameNumber,
+                pts: frame.pts,
                 drift,
                 promise: p,
                 intraThreshAtDispatch: intraThresh,
@@ -343,6 +354,7 @@ export class SceneDetector {
               );
               commitInline(
                 frame.frameNumber,
+                frame.pts,
                 res.rawScore,
                 drift,
                 intraThresh,
@@ -355,15 +367,14 @@ export class SceneDetector {
               );
             }
           } else {
-            // Below the gate: no WASM. Flush inflight first so smoother
-            // sees results in frame order.
+            // Below the gate: no WASM. Flush inflight first so emit order
+            // stays in frame order, then mark no-cut.
             await drainAll();
-            emit(frame.frameNumber, 0);
+            emitInline(frame.frameNumber, frame.pts, 0, curData);
           }
         } else {
-          // First frame: seed keyframeData so drift can compute against it
-          // right away. The very first scene cut at frame 0 has confidence 1
-          // and was pushed before extractFrames started.
+          // First frame: seed keyframeData. Frame 0 is already pushed as a
+          // scene before extractFrames started.
           refreshKeyframe(frame.data);
         }
 
@@ -400,18 +411,6 @@ export class SceneDetector {
     );
 
     await drainAll();
-
-    const tail = smoother.flush();
-    for (const e of tail) {
-      const scene: SceneInfo = {
-        frameNumber: e.frameNumber,
-        timestamp: e.frameNumber / metadata.fps,
-        timecode: formatTimecode(e.frameNumber / metadata.fps),
-        confidence: e.confidence
-      };
-      scenes.push(scene);
-      this.options.onScene(scene);
-    }
 
     const endTime = Date.now();
     const processingTime = (endTime - startTime) / 1000;

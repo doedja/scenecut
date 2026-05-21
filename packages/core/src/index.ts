@@ -8,7 +8,6 @@
 
 export { SceneDetector } from './detector';
 export { WasmBridge, calibratePCut } from './wasm-bridge';
-export { SceneSmoother } from './scene-smoother';
 
 export type {
   DetectionOptions,
@@ -29,7 +28,6 @@ export type {
 } from './types';
 
 export type { SceneChangeResult } from './wasm-bridge';
-export type { SmootherConfig, Candidate, SmoothedEmission } from './scene-smoother';
 export type { SceneDetectorOptions, DetectorExtras } from './detector';
 export { MotionWorkerPool } from './worker/pool';
 export type {

@@ -26,7 +26,7 @@ export type { WebWasmFactoryOptions } from './wasm-factory';
 export { createWebMotionPool } from './worker-pool';
 export type { CreateWebPoolOptions } from './worker-pool';
 
-export { SceneDetector, WasmBridge, SceneSmoother, calibratePCut, MotionWorkerPool } from '@doedja/scenecut-core';
+export { SceneDetector, WasmBridge, calibratePCut, MotionWorkerPool } from '@doedja/scenecut-core';
 export type {
   DetectionOptions,
   DetectionResult,
