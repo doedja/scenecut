@@ -1,0 +1,30 @@
+# scenecut
+
+Monorepo. Three libraries and one app.
+
+- `packages/core` (`@doedja/scenecut-core`): algorithm + WASM + exporters. No Node APIs, no DOM. Accepts a `FrameSource` and a `WasmFactory` from callers.
+- `packages/node` (`@doedja/scenecut`): ffmpeg-based Node lib + CLI.
+- `packages/web` (`@doedja/scenecut-web`): browser lib. Auto-picks WebCodecs + mp4box for MP4/MOV, the hand-rolled EBML demuxer for MKV/WebM, `<video>` fallback for everything else.
+- `apps/web` (`scenecut-web-app`): the static site. Deploys to Cloudflare Pages.
+
+## Non-obvious decisions
+
+- Emscripten glue is built with `-s EXPORT_ES6=1` and `-s ENVIRONMENT='web,worker,node'`. Main thread, Web Workers, Node `worker_threads` all load it via dynamic `import()`. Do not revert.
+- Detector state (`intraCount`) must mutate strictly in frame order. The worker pool runs WASM calls concurrently, but results drain in order via an inflight queue in `packages/core/src/detector.ts`. WebCodecs pipeline serializes the `output` callback the same way. The single-thread detector is v1.0.2 byte-for-byte on identical ffmpeg-decoded input: stride-64 MAD gate with threshold 5, WASM per-frame at base thresholds, emit when `rawScore >= intraThresh2` (sigmoid `pCut >= 0.5` is the same boundary). Default `searchRange: 'medium'` (fcode=4 always), default `sensitivity: 'low'`. WASM C uses the v1.0.2 warmup boost formula (no resolution scaling) and the early-exit returns `IntraThresh2 * 2`. No fade rescue, no keyframe-drift snapshot, no smoother: v1.0.2 shipped fade-rescue code but a double-buffer bug in its `detectSceneChange` made the rescue's second WASM call compare cur to cur (sSAD ~10, below any fadeThresh2), so it never fired. 3.0.3-3.0.7 reintroduced a working rescue via `detectSceneChangeStateless`, which emitted cuts v1 missed and shifted intraCount, diverging output. 3.0.8 / 0.1.8 strips the rescue to ship v1's actual behavior. v3.0.0-3.0.2 used an EMA drift + aggressive NMS that lost rapid-cut and fade content (Dorohedoro EP08 recall 57% vs v1.0.2). Pool path is not byte-identical to v1 (v1 had no pool); intraCount staleness across the inflight queue documented below.
+- Worker pool dispatches use the `intraCount` value at dispatch time, not at result time. While `pool.size * 2` frames are inflight, all of them see the same intraCount because emit only mutates state after `drainOne`. After a confirmed cut, the next ~2*pool.size dispatches stay at intraCount=1 and pick up the full C-side warmup boost on `IntraThresh2`. Real cuts inside that window can be suppressed. Single-thread path is unaffected. If you are tuning rapid-cut recall with workers enabled, this is the first suspect.
+- Version-parity work (e.g. "restore vX output"): verify by comparing OUTPUT between versions, not by matching code shape. The 93bb456 commit's "92.5/97.1% recall vs v1.0.2" claim was based on rescue code that was DEAD in v1 due to a dbuf bug; 3.0.6 and 3.0.7 trusted that claim, "restored" the working code shape, and diverged from v1's actual output. Older commit-message recall claims are not authoritative. When changing detector logic, the test is the emitted scene list against a known v1-output baseline, not the diff of code paths.
+- Prebuilt WASM lives at `apps/web/public/wasm/detection.wasm{,.js}` and is tracked in git via narrow `.gitignore` exceptions. Do not commit `packages/core/dist/`: it drags tsc/rollup junk. Regenerate the WASM only when `packages/core/src/wasm/*.c` changes.
+- Sub-package deps use explicit semver (`^0.1.1`), not `workspace:*`. Two reasons: CF Pages runs `npm install` pre-build and npm does not understand the `workspace:` protocol, and `bun publish` ships the literal `workspace:*` string to the registry (npm publish rewrites it, bun does not). Publish each package with `npm publish --workspaces-update=false --access public` from its own dir, not `bun publish`. The `--workspaces-update=false` flag is required: without it, npm 11+ runs an `updateWorkspaces` step post-publish that calls arborist on the whole monorepo, and arborist crashes on bun's `node_modules/.bun/...` symlink layout (`Cannot read properties of null (reading 'matches')`). 3.0.1 and 0.1.1 broke external installs for exactly the workspace:* reason.
+- `bin` paths in `packages/node/package.json` must not start with `./`. npm silently strips malformed bin entries at publish time (warning, not error), so a leading `./` ships a tarball with no CLI. Use `"scenecut": "bin/cli.js"`.
+- Grayscale is read from the I420 Y-plane with zero conversion. Frames in unsupported formats (RGB-packed, 10-bit) fall back to an OffscreenCanvas draw + RGBA-to-luma pass.
+- Exporters (`formatEdl`, `formatFcpxml`, `formatPremiereMarkers`, etc.) live in core and are re-exported from both node and web. Any format fix lands once.
+- Aegisub keyframe format is positional. Line 1 must be the literal `# keyframe format v1`, line 2 must be `fps <n>`, lines 3+ are frame numbers. Aegisub does not skip extra `#` comment lines despite the prefix suggesting it would. Don't add a version stamp, generation timestamp, or any other metadata between the magic line and the fps line. 3.0.4 shipped a `# scenecut <ver>` line and Aegisub silently rejected the file.
+- Releasing is a four-place version bump: each of the three `package.json` `version` fields, the `dependencies["@doedja/scenecut-core"]` pin in `packages/node/package.json` and `packages/web/package.json`, and the `version` const + `info.version` in `packages/node/src/index.ts`. Then `bun --filter='./packages/<name>' run build` for each before `npm publish`, otherwise the tarballs ship stale dist. Publish core first so node/web installs resolve the new core. Run `npm whoami` before bumping; a 401 means `npm login` first (browser flow), do not start the bump until that completes.
+
+## Builds
+
+- `bun run build`: everything. Requires emscripten.
+- `bun run build:site`: skips the WASM rebuild. What Cloudflare Pages runs.
+- `bun --filter='./packages/<name>' run <script>`: per-package. Path, not npm name.
+
+Local dev: `bun run dev:app` (port 5173+ if taken).
