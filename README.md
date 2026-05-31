@@ -1,5 +1,7 @@
 # scenecut
 
+[![npm](https://img.shields.io/npm/v/@doedja/scenecut)](https://www.npmjs.com/package/@doedja/scenecut) [![downloads](https://img.shields.io/npm/dm/@doedja/scenecut)](https://www.npmjs.com/package/@doedja/scenecut) [![license](https://img.shields.io/badge/license-GPL--2.0-blue)](./LICENSE)
+
 Fast, accurate scene change detection. Xvid motion estimation compiled to WebAssembly, an online smoother, per-video adaptive calibration, and a parallel worker pool. Runs in **Node.js** (CLI + library) and in the **browser** (static site, no uploads).
 
 ## Repo layout
