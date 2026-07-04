@@ -53,7 +53,8 @@ scenecut video.mp4 --thumbnails ./thumbs
 |--------|-------|-------------|---------|
 | `--format` | `-f` | see format list below | `aegisub` |
 | `--output` | `-o` | Output path | `{filename}_keyframes.{ext}` |
-| `--sensitivity` | `-s` | `low` \| `medium` \| `high` | `low` |
+| `--sensitivity` | `-s` | `low` \| `medium` \| `high` | `medium` |
+| `--search-range` | | `auto` \| `small` \| `medium` \| `large` | `small` |
 | `--workers` | `-w` | `true` \| number \| `off` | `off` |
 | `--timeout` | `-t` | Abort after N seconds | off |
 | `--thumbnails` | | Scene thumbnail directory | — |
@@ -76,8 +77,8 @@ scenecut video.mp4 --thumbnails ./thumbs
 
 | Level | Base threshold | When to use |
 |-------|---------------|-------------|
-| `low`    | sSAD ≥ 150 | Hard cuts only. Default. Robust on compressed/noisy footage. |
-| `medium` | sSAD ≥ 90  | Balanced. |
+| `low`    | sSAD ≥ 150 | Hard cuts only. Fewer false cuts, misses dark/low-contrast cuts. Robust on compressed/noisy footage. |
+| `medium` | sSAD ≥ 90  | Default. Xvid's stock thresholds, same recall as vapoursynth-scxvid. |
 | `high`   | sSAD ≥ 50  | Catches subtle transitions. More false positives on noise. |
 
 The base threshold is a starting point. During the first ~2 seconds of video, scenecut measures the noise floor and nudges the threshold upward if the content is noisier than expected, capped at 4× the base.
@@ -88,7 +89,7 @@ The base threshold is a starting point. During the first ~2 seconds of video, sc
 const { detectSceneChanges } = require('@doedja/scenecut');
 
 const result = await detectSceneChanges('input.mp4', {
-  sensitivity: 'low',
+  sensitivity: 'medium',
   workers: true,
   onProgress: (p) => console.log(`${p.percent}% — ${p.fps?.toFixed(1)} fps`),
   onScene:    (s) => console.log(`cut @ ${s.timecode} conf=${s.confidence?.toFixed(2)}`)
@@ -99,8 +100,8 @@ console.log(`${result.scenes.length} scenes`);
 
 ```ts
 interface NodeDetectionOptions {
-  sensitivity?: 'low' | 'medium' | 'high';             // default: 'low'
-  searchRange?: 'auto' | 'small' | 'medium' | 'large'; // default: 'auto'
+  sensitivity?: 'low' | 'medium' | 'high';             // default: 'medium'
+  searchRange?: 'auto' | 'small' | 'medium' | 'large'; // default: 'small'
   workers?: number | boolean;                          // default: off
   onProgress?: (p: Progress) => void;
   onScene?: (s: SceneInfo) => void;
@@ -195,7 +196,7 @@ const pool = createWebMotionPool({
 const result = await detectSceneChanges(file, {
   wasmFactory,
   pool,
-  sensitivity: 'low',
+  sensitivity: 'medium',
   onScene: (s) => console.log(s)
 });
 ```

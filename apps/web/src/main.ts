@@ -78,7 +78,7 @@ interface AppState {
 const state: AppState = {
   queue: [],
   selectedId: null,
-  settings: { sensitivity: 'low', maxDim: 0 },
+  settings: { sensitivity: 'medium', maxDim: 0 },
   preview: { objectUrl: null, loadedForId: null }
 };
 

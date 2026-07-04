@@ -43,7 +43,7 @@ export function calculateFcode(searchRange: SearchRange, width: number, height: 
       if (pixels <= 1920 * 1080) return 4;
       return 5;
     }
-    default: return 4;
+    default: return 2;
   }
 }
 
@@ -52,7 +52,7 @@ export function calculateThresholds(sensitivity: SensitivityLevel): { intraThres
     case 'low':    return { intraThresh: 3000, intraThresh2: 150 };
     case 'medium': return { intraThresh: 2000, intraThresh2: 90 };
     case 'high':   return { intraThresh: 1000, intraThresh2: 50 };
-    default:       return { intraThresh: 3000, intraThresh2: 150 };
+    default:       return { intraThresh: 2000, intraThresh2: 90 };
   }
 }
 

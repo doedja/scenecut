@@ -43,10 +43,18 @@ Examples:
 Options:
   --output, -o <file>       Output file (default: {filename}_keyframes.txt)
   --format, -f <format>     Output format (default: aegisub)
-  --sensitivity, -s <level> Sensitivity: low|medium|high (default: low)
+  --sensitivity, -s <level> Sensitivity: low|medium|high (default: medium)
+  --search-range <range>    ME search range: auto|small|medium|large (default: small)
+                            Wider ranges miss cuts that narrow ranges catch;
+                            widen only if fast pans produce too many false cuts.
   --workers, -w <n>         Parallel WASM workers (true | number | off, default: off)
   --timeout, -t <seconds>   Abort after N seconds (default: no timeout)
   --thumbnails <dir>        Extract scene thumbnails to directory
+  --v2                      Experimental: flash suppression + adaptive threshold
+                            (single-thread). Fewer false cuts on flashing scenes,
+                            better recall on dark/low-contrast cuts.
+  --flash-suppress          Experimental: suppress flash/fade false cuts only
+  --adaptive                Experimental: adaptive threshold only
   --quiet, -q               Suppress progress output
   --verbose, -v             Show detailed output
   --help, -h                Show this help
@@ -77,12 +85,15 @@ if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
 let videoPath = null;
 let outputPath = null; // Will be derived from video filename if not specified
 let outputFormat = 'aegisub'; // Default to Aegisub format
-let sensitivity = 'low';
+let sensitivity = 'medium';
+let searchRange = 'small';
 let quiet = false;
 let verbose = false;
 let timeout = 0;
 let thumbnailDir = null;
 let workers = false;
+let flashSuppress = false;
+let adaptiveThreshold = false;
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -93,6 +104,8 @@ for (let i = 0; i < args.length; i++) {
     outputFormat = args[++i];
   } else if (arg === '--sensitivity' || arg === '-s') {
     sensitivity = args[++i];
+  } else if (arg === '--search-range') {
+    searchRange = args[++i];
   } else if (arg === '--timeout' || arg === '-t') {
     timeout = parseInt(args[++i], 10);
   } else if (arg === '--workers' || arg === '-w') {
@@ -102,6 +115,13 @@ for (let i = 0; i < args.length; i++) {
     else { const n = parseInt(v, 10); workers = Number.isFinite(n) && n > 0 ? n : true; }
   } else if (arg === '--thumbnails') {
     thumbnailDir = args[++i];
+  } else if (arg === '--v2') {
+    flashSuppress = true;
+    adaptiveThreshold = true;
+  } else if (arg === '--flash-suppress') {
+    flashSuppress = true;
+  } else if (arg === '--adaptive') {
+    adaptiveThreshold = true;
   } else if (arg === '--quiet' || arg === '-q') {
     quiet = true;
   } else if (arg === '--verbose' || arg === '-v') {
@@ -187,8 +207,10 @@ async function run() {
   try {
     const options = {
       sensitivity,
-      searchRange: 'medium',
+      searchRange,
       workers,
+      flashSuppress,
+      adaptiveThreshold,
       signal: controller ? controller.signal : undefined,
       onProgress: (progress) => {
         if (quiet) return;

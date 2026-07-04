@@ -58,20 +58,29 @@ interface PendingAnalysis {
 export class SceneDetector {
   private options: Required<Pick<DetectionOptions,
     'sensitivity' | 'searchRange' | 'onProgress' | 'onScene' | 'format'
-  >> & { signal?: AbortSignal; pool?: MotionWorkerPool };
+  >> & { signal?: AbortSignal; pool?: MotionWorkerPool;
+    flashSuppress: boolean; adaptiveThreshold: boolean };
 
   private wasmBridge: WasmBridge;
   private state: DetectionState;
 
   constructor(factory: WasmFactory, options: SceneDetectorOptions = {}) {
     this.options = {
-      sensitivity: options.sensitivity || 'low',
-      searchRange: options.searchRange || 'medium',
+      // Defaults tuned recall-first against vapoursynth-scxvid (Xvid 1.3.x
+      // MEanalysis) on labeled anime: 'medium' (90/2000) is Xvid's stock
+      // threshold pair; 'small' (fcode 2) matches Xvid's effective search
+      // range. 'low' + 'medium' range missed real cuts a stock scxvid run
+      // caught (wide ME search motion-compensates real cuts under the
+      // threshold). Cost is more false positives, which is the chosen trade.
+      sensitivity: options.sensitivity || 'medium',
+      searchRange: options.searchRange || 'small',
       onProgress: options.onProgress || (() => {}),
       onScene: options.onScene || (() => {}),
       format: options.format || 'json',
       signal: options.signal,
-      pool: options.pool
+      pool: options.pool,
+      flashSuppress: options.flashSuppress || false,
+      adaptiveThreshold: options.adaptiveThreshold || false
     };
 
     this.wasmBridge = new WasmBridge(factory);
@@ -124,13 +133,16 @@ export class SceneDetector {
     const inflight: PendingAnalysis[] = [];
     const maxInflight = pool ? Math.max(2, pool.size * 2) : 0;
 
-    const emit = (frameNumber: number, pts: number, pCut: number): void => {
-      if (pCut >= 0.5) {
+    // emit records a cut/non-cut and advances intraCount. isCut is the decision
+    // (v1: rawScore >= intraThresh2; v2: flash-suppressed + adaptive). confidence
+    // is the v1 sigmoid p_cut, kept identical so output metadata is unchanged.
+    const emit = (frameNumber: number, pts: number, isCut: boolean, confidence: number): void => {
+      if (isCut) {
         const scene: SceneInfo = {
           frameNumber,
           timestamp: pts,
           timecode: formatTimecode(pts),
-          confidence: pCut
+          confidence
         };
         scenes.push(scene);
         this.options.onScene(scene);
@@ -140,12 +152,37 @@ export class SceneDetector {
       }
     };
 
+    // ---- v2 (experimental, single-thread) state ----
+    const v2 = !pool && (this.options.flashSuppress || this.options.adaptiveThreshold);
+    const FLASH_RESID = 15;   // flashes measured at residualMAD < 10; real cuts > 27
+    const FLASH_MEAN = 20;    // only suppress when there is a real global luma shift
+    const ADAPT_ALPHA = 0.05; // EWMA memory ~ 1/alpha frames
+    const ADAPT_K = 3;        // outlier = mean + K*std
+    const FLOOR = intraThresh2 * 0.4;
+    let ewmaMean = intraThresh2 * 0.6;
+    let ewmaVar = 0;
+    let ewmaCount = 0;
+    const updateEwma = (x: number): void => {
+      const prevMean = ewmaMean;
+      ewmaMean += ADAPT_ALPHA * (x - ewmaMean);
+      ewmaVar += ADAPT_ALPHA * ((x - prevMean) * (x - ewmaMean) - ewmaVar);
+      ewmaCount++;
+    };
+    const residualMad = (prevData: Uint8Array, curData: Uint8Array, meanSigned: number): number => {
+      let s = 0, n = 0;
+      for (let i = 0; i < curData.length; i += gateStride) {
+        const d = (curData[i] - prevData[i]) - meanSigned;
+        s += d < 0 ? -d : d; n++;
+      }
+      return n > 0 ? s / n : 0;
+    };
+
     const drainOne = async (): Promise<void> => {
       const head = inflight.shift();
       if (!head) return;
       const result = await head.promise;
       const pCut = calibratePCut(result.rawScore, head.intraThresh2AtDispatch);
-      emit(head.frameNumber, head.pts, pCut);
+      emit(head.frameNumber, head.pts, pCut >= 0.5, pCut);
     };
 
     const drainAll = async (): Promise<void> => {
@@ -168,14 +205,18 @@ export class SceneDetector {
           const curData = this.state.curFrame.data;
 
           let madSum = 0;
+          let signedSum = 0;
           let madCount = 0;
           for (let i = 0; i < curData.length; i += gateStride) {
             const c = curData[i];
             const p = prevData[i];
-            madSum += c > p ? c - p : p - c;
+            const d = c - p;
+            signedSum += d;
+            madSum += d < 0 ? -d : d;
             madCount++;
           }
           const mad = madCount > 0 ? madSum / madCount : 0;
+          const meanSigned = madCount > 0 ? signedSum / madCount : 0;
 
           if (mad >= gateMad) {
             if (pool) {
@@ -208,15 +249,39 @@ export class SceneDetector {
                 intraThresh,
                 intraThresh2
               );
-              const pCut = calibratePCut(res.rawScore, intraThresh2);
-              emit(frame.frameNumber, frame.pts, pCut);
+              const rawScore = res.rawScore;
+              const confidence = calibratePCut(rawScore, intraThresh2);
+
+              if (v2) {
+                // A. flash suppression: large global luma shift, small residual.
+                const isFlash = this.options.flashSuppress
+                  && Math.abs(meanSigned) > FLASH_MEAN
+                  && residualMad(prevData, curData, meanSigned) < FLASH_RESID;
+
+                if (isFlash) {
+                  emit(frame.frameNumber, frame.pts, false, confidence);
+                } else {
+                  // C. adaptive threshold: outlier vs recent baseline, clamped so
+                  // it never rises above the v1 fixed threshold (recall only up).
+                  let thresh = intraThresh2;
+                  if (this.options.adaptiveThreshold && ewmaCount >= 20) {
+                    const std = Math.sqrt(ewmaVar > 0 ? ewmaVar : 0);
+                    thresh = Math.min(intraThresh2, Math.max(FLOOR, ewmaMean + ADAPT_K * std));
+                  }
+                  const isCut = rawScore >= thresh;
+                  if (!isCut && this.options.adaptiveThreshold) updateEwma(rawScore);
+                  emit(frame.frameNumber, frame.pts, isCut, confidence);
+                }
+              } else {
+                emit(frame.frameNumber, frame.pts, rawScore >= intraThresh2, confidence);
+              }
             }
           } else {
             // Below the gate: no WASM. Flush inflight first so emit stays
             // in frame order, then mark no-cut. v1.0.2 just incremented
             // intraCount here; we do the same via emit(pCut=0).
             await drainAll();
-            emit(frame.frameNumber, frame.pts, 0);
+            emit(frame.frameNumber, frame.pts, false, 0);
           }
         }
 

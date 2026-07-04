@@ -36,7 +36,7 @@ async function detect(file: File) {
   const result = await detectSceneChanges(file, {
     wasmFactory,
     pool,
-    sensitivity: 'low',
+    sensitivity: 'medium',
     onProgress: (p) => console.log(`${p.percent}%`),
     onScene: (s) => console.log(`cut @ ${s.timecode}`)
   });
@@ -81,8 +81,8 @@ interface BrowserDetectionOptions {
   wasmFactory: WasmFactory;          // required
   pool?: MotionWorkerPool;           // recommended for speed
 
-  sensitivity?: 'low' | 'medium' | 'high';        // default: 'low'
-  searchRange?: 'auto' | 'small' | 'medium' | 'large';
+  sensitivity?: 'low' | 'medium' | 'high';        // default: 'medium'
+  searchRange?: 'auto' | 'small' | 'medium' | 'large';  // default: 'small'
   maxDimension?: number;             // downscale longest side; e.g. 1080
   decoder?: 'auto' | 'webcodecs' | 'video';       // default: 'auto'
   decodeQueueTarget?: number;        // backpressure knob for WebCodecs

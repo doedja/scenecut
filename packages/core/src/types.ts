@@ -67,12 +67,36 @@ export type SearchRange = 'auto' | 'small' | 'medium' | 'large';
 export type ExportFormat = 'json' | 'csv' | 'edl';
 
 export interface DetectionOptions {
+  /** Threshold pair for the cut decision. Default 'medium' (90/2000), which
+   * is Xvid's stock MEanalysis pair, i.e. what vapoursynth-scxvid uses.
+   * 'low' (150/3000) trades recall for fewer false cuts. */
   sensitivity?: SensitivityLevel;
+  /** Motion-estimation search range. Default 'small' (fcode 2, +/-32px),
+   * matching scxvid's effective range. Wider ranges compensate real cuts
+   * below the threshold and lose recall; use them only when false cuts on
+   * fast pans are worse than missed cuts. */
   searchRange?: SearchRange;
   onProgress?: (progress: Progress) => void;
   onScene?: (scene: SceneInfo) => void;
   format?: ExportFormat;
   signal?: AbortSignal;
+  /**
+   * v2 (experimental, single-thread only). Suppress cuts caused by a global
+   * luminance change (flash/fade/strobe). A frame is treated as a flash when
+   * the mean signed luma delta is large but the residual MAD after removing
+   * that global shift is small (whole frame moved together). Removes the
+   * burst false-positives on flashing scenes. Default off (v1 parity).
+   */
+  flashSuppress?: boolean;
+  /**
+   * v2 (experimental, single-thread only). Replace the fixed sSAD threshold
+   * with a rolling outlier test (EWMA mean + K*std of recent non-cut scores),
+   * clamped to [intraThresh2*0.4, intraThresh2]. Lowers the bar in dark/low-
+   * contrast scenes where real cuts score below the fixed threshold, without
+   * raising it elsewhere. Never exceeds the v1 threshold, so recall only goes
+   * up. Default off (v1 parity).
+   */
+  adaptiveThreshold?: boolean;
 }
 
 export interface WasmModule {

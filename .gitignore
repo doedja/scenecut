@@ -52,6 +52,9 @@ tmp/
 temp/
 *.tmp
 
+# Cross-session handoffs (local, per-machine)
+.handoff/
+
 # Test fixtures
 test/fixtures/*.mp4
 test/fixtures/*.mkv
