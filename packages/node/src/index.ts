@@ -109,11 +109,11 @@ export function extractSceneImages(
   });
 }
 
-export const version = '3.0.8';
+export const version = '3.1.0';
 
 export const info = {
   name: 'scenecut',
-  version: '3.0.8',
+  version: '3.1.0',
   description: 'Scene change detection for Node.js using Xvid motion estimation',
   license: 'GPL-2.0',
   credits: {

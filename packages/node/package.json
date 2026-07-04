@@ -1,6 +1,6 @@
 {
   "name": "@doedja/scenecut",
-  "version": "3.0.8",
+  "version": "3.1.0",
   "description": "Scene change detection for Node.js using Xvid's motion estimation algorithm",
   "main": "dist/scenecut.cjs.js",
   "module": "dist/scenecut.esm.js",
@@ -55,7 +55,7 @@
   },
   "homepage": "https://github.com/doedja/scenecut#readme",
   "dependencies": {
-    "@doedja/scenecut-core": "^0.1.8",
+    "@doedja/scenecut-core": "^0.2.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@ffprobe-installer/ffprobe": "^2.1.2",
     "fluent-ffmpeg": "^2.1.2"
